@@ -1,0 +1,131 @@
+// Prisma schema for jewel-catalog Shopify app
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+// ── Shopify auth (preserved from template) ──
+
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+// ── Shop-level settings ──
+
+model ShopSettings {
+  id                Int      @id @default(autoincrement())
+  shop              String   @unique
+  supplierApiKey    String   @default("")
+  lastFetchAt       DateTime?
+  vendor            String   @default("LGD USA")
+  compareAtPriceRule String  @default("none")
+  compareAtMultiplier Float  @default(1.5)
+  compareAtFixed    Float    @default(0)
+  defaultLocationId String   @default("")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// ── Local catalog of supplier products ──
+
+model SupplierProduct {
+  id            Int      @id @default(autoincrement())
+  shop          String
+  stockNo       String
+  subitem       String
+  category      String
+  jewelryType   String
+  metalType     String
+  shape         String
+  color         String
+  clarity       String
+  diaPcs        String
+  diaWt         String
+  grossWt       String
+  growthType    String
+  size          String
+  certificate   String
+  inhandPcs     String
+  memoOut       String
+  price         Float
+  castingWt     String
+  remarks       String
+  image1        String
+  image2        String
+  video         String
+  syncHash      String
+  selected      Boolean  @default(false)
+  pushed        Boolean  @default(false)
+  fetchedAt     DateTime @default(now())
+
+  @@unique([shop, stockNo])
+  @@index([shop, category])
+  @@index([shop, jewelryType])
+  @@index([shop, metalType])
+  @@index([shop, shape])
+  @@index([shop, size])
+  @@index([shop, clarity])
+  @@index([shop, selected])
+  @@index([shop, pushed])
+}
+
+// ── Shopify product mapping (dedup) ──
+
+model ShopifyProductMapping {
+  id               Int      @id @default(autoincrement())
+  shop             String
+  supplierStockNo  String   @unique
+  shopifyProductId String
+  shopifyProductTitle String?
+  pushedAt         DateTime @default(now())
+}
+
+// ── Push job tracking ──
+
+model PushJob {
+  id              Int      @id @default(autoincrement())
+  shop            String
+  status          String   @default("IDLE")
+  totalSelected   Int      @default(0)
+  pushedCount     Int      @default(0)
+  failedCount     Int      @default(0)
+  startedAt       DateTime?
+  completedAt     DateTime?
+  errorMessage    String?
+  createdAt       DateTime @default(now())
+
+  @@index([shop, status])
+}
+
+model PushLog {
+  id        Int      @id @default(autoincrement())
+  shop      String
+  jobId     Int
+  level     String   @default("info")
+  message   String
+  stockNo   String?
+  createdAt DateTime @default(now())
+
+  @@index([jobId])
+}

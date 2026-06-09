@@ -1,0 +1,27 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "33c519b66f9203979eb9e65f469dbfc3"
+application_url = "https://example.com"
+embedded = true
+name = "jewel-catalog"
+
+[access_scopes]
+scopes = "write_products,read_products,write_inventory,read_inventory,write_files"
+
+[auth]
+redirect_urls = ["https://example.com/api/auth"]
+
+[webhooks]
+api_version = "2026-07"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = ["app/uninstalled"]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = ["app/scopes_update"]
+
+[build]
+include_config_on_deploy = true
+automatically_update_urls_on_dev = true
