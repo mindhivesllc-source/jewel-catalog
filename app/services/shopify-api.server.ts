@@ -76,7 +76,7 @@ export async function updateProduct(
 export async function setProductWithPricing(
   admin: Admin,
   productId: string,
-  productFields: Record<string, unknown>,
+  _productFields: Record<string, unknown>,
   variantPrice: { price: string; compareAtPrice?: string | null },
 ): Promise<void> {
   // First get the variant ID
@@ -84,39 +84,46 @@ export async function setProductWithPricing(
     query gv($id: ID!) { product(id: $id) { variants(first:1) { edges { node { id } } } } }
   `;
   const getRes = await admin.graphql(getQuery, { variables: { id: productId } });
-  const getBody = (await getRes.json()) as { data?: { product?: { variants?: { edges?: { node: { id: string } }[] } } } };
+  const getBody = (await getRes.json()) as {
+    data?: { product?: { variants?: { edges?: { node: { id: string } }[] } } };
+  };
 
   const variantId = getBody.data?.product?.variants?.edges?.[0]?.node?.id;
   if (!variantId) {
-    console.warn("[push] No variant ID found for pricing — skipping price set");
+    console.warn("[push] No variant ID for pricing — skipping");
     return;
   }
 
+  // productVariantsBulkUpdate accepts: id, price, compareAtPrice
+  // Does NOT accept: sku, optionValues, inventoryQuantities
+  const variantInput: Record<string, unknown> = {
+    id: variantId,
+    price: variantPrice.price,
+  };
+  if (variantPrice.compareAtPrice) {
+    variantInput.compareAtPrice = variantPrice.compareAtPrice;
+  }
+
   const query = `#graphql
-    mutation productSet($input: ProductSetInput!) {
-      productSet(input: $input) {
+    mutation pvu($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
         userErrors { field message }
         product { id }
       }
     }
   `;
 
-  const input: Record<string, unknown> = {
-    id: productId,
-    ...productFields,
-    variants: [{
-      id: variantId,
-      price: variantPrice.price,
-      ...(variantPrice.compareAtPrice ? { compareAtPrice: variantPrice.compareAtPrice } : {}),
-    }],
+  const res = await admin.graphql(query, {
+    variables: { productId, variants: [variantInput] },
+  });
+  const body = (await res.json()) as {
+    data?: { productVariantsBulkUpdate?: { userErrors?: UserError[] } };
+    errors?: unknown;
   };
 
-  const res = await admin.graphql(query, { variables: { input } });
-  const body = (await res.json()) as { data?: { productSet?: { userErrors?: UserError[] } }; errors?: unknown };
-
-  if (body.errors) throw new Error(`productSet errors: ${JSON.stringify(body.errors)}`);
-  if (body.data?.productSet?.userErrors?.length) {
-    throw new Error(`productSet userErrors: ${JSON.stringify(body.data.productSet.userErrors)}`);
+  if (body.errors) throw new Error(`productVariantsBulkUpdate errors: ${JSON.stringify(body.errors)}`);
+  if (body.data?.productVariantsBulkUpdate?.userErrors?.length) {
+    throw new Error(`productVariantsBulkUpdate userErrors: ${JSON.stringify(body.data.productVariantsBulkUpdate.userErrors)}`);
   }
 }
 
