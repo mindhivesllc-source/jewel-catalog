@@ -10,6 +10,9 @@ import {
   createProduct,
   updateProduct,
   findProductBySupplierId,
+  setProductWithPricing,
+  appendProductMedia,
+  setProductMetafields,
 } from "./shopify-api.server";
 import type { Admin } from "./shopify-api.server";
 
@@ -69,30 +72,14 @@ function dbRowToSupplierItem(row: Record<string, unknown>): SupplierItem {
 function toGraphQLInput(
   input: ReturnType<typeof buildShopifyProductInput>,
 ): Record<string, unknown> {
+  // ProductCreateInput only accepts: title, descriptionHtml, vendor,
+  // productType, tags. No media, no metafields, no variants.
   return {
     title: input.title,
-    bodyHtml: input.bodyHtml,
+    descriptionHtml: input.descriptionHtml,
     vendor: input.vendor,
     productType: input.productType,
     tags: input.tags,
-    variants: input.variants.map((v) => ({
-      price: v.price,
-      ...(v.compareAtPrice !== undefined && v.compareAtPrice !== null
-        ? { compareAtPrice: v.compareAtPrice }
-        : {}),
-      sku: v.sku,
-      optionValues: v.optionValues,
-    })),
-    images: input.images.map((img) => ({
-      src: img.src,
-      ...(img.altText ? { altText: img.altText } : {}),
-    })),
-    metafields: input.metafields.map((mf) => ({
-      namespace: mf.namespace,
-      key: mf.key,
-      value: mf.value,
-      type: mf.type,
-    })),
   };
 }
 
@@ -212,6 +199,15 @@ export async function pushSelectedProducts(
           graphqlInput,
         );
 
+        // Update variant prices too
+        const vt = shopifyInput.variant;
+        if (vt) {
+          await setProductWithPricing(admin, shopifyProduct.id, {}, {
+            price: vt.price,
+            compareAtPrice: vt.compareAtPrice,
+          });
+        }
+
         // Update mapping title if changed
         await prisma.shopifyProductMapping.update({
           where: { id: existingMapping.id },
@@ -236,6 +232,15 @@ export async function pushSelectedProducts(
           // Product exists in Shopify but not in our mapping — update
           shopifyProduct = await updateProduct(admin, found.id, graphqlInput);
 
+          // Update variant prices
+          const vt2 = shopifyInput.variant;
+          if (vt2) {
+            await setProductWithPricing(admin, shopifyProduct.id, {}, {
+              price: vt2.price,
+              compareAtPrice: vt2.compareAtPrice,
+            });
+          }
+
           await prisma.shopifyProductMapping.create({
             data: {
               shop,
@@ -254,6 +259,33 @@ export async function pushSelectedProducts(
         } else {
           // Create new Shopify product
           shopifyProduct = await createProduct(admin, graphqlInput);
+
+          // Add media (images) after creation
+          if (shopifyInput.media && shopifyInput.media.length > 0) {
+            try {
+              await appendProductMedia(admin, shopifyProduct.id, shopifyInput.media);
+            } catch (e: any) {
+              console.error(`[push] Media append failed ${product.stockNo}: ${e.message}`);
+            }
+          }
+
+          // Set metafields after creation
+          if (shopifyInput.metafields && shopifyInput.metafields.length > 0) {
+            try {
+              await setProductMetafields(admin, shopifyProduct.id, shopifyInput.metafields);
+            } catch (e: any) {
+              console.error(`[push] Metafield set failed ${product.stockNo}: ${e.message}`);
+            }
+          }
+
+          // Set variant price (separate step in 2026+ API)
+          const variantToSet = shopifyInput.variant;
+          if (variantToSet) {
+            await setProductWithPricing(admin, shopifyProduct.id, {}, {
+              price: variantToSet.price,
+              compareAtPrice: variantToSet.compareAtPrice,
+            });
+          }
 
           await prisma.shopifyProductMapping.create({
             data: {
@@ -294,6 +326,8 @@ export async function pushSelectedProducts(
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : "Unknown error";
+
+      console.error(`[push] Failed ${product.stockNo}: ${errorMessage}`);
 
       // Log failure
       await prisma.pushLog.create({

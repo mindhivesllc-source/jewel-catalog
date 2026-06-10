@@ -10,7 +10,6 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 
 interface Product {
   stockNo: string;
-  name: string;
   jewelryType: string;
   category: string;
   metalType: string;
@@ -18,8 +17,8 @@ interface Product {
   clarity: string;
   size: string;
   image1: string;
-  diaCts: number;
-  grossWeight: number;
+  diaWt: string;
+  grossWt: string;
   subitem: string;
   price: number;
   selected: boolean;
@@ -32,6 +31,11 @@ interface CountsData {
   pushed: number;
   notPushed: number;
   categories: string[];
+  shapes: string[];
+  metals: string[];
+  styles: string[];
+  sizes: string[];
+  clarities: string[];
 }
 
 interface ProductsData {
@@ -44,16 +48,16 @@ interface ProductsData {
 /* ── Constants ─────────────────────────────────────────────── */
 
 const WEIGHT_RANGES = [
-  { value: "", label: "All Weights" },
-  { value: "0-2", label: "0-2 Ct." },
-  { value: "2-4", label: "2-4 Ct." },
-  { value: "4-6", label: "4-6 Ct." },
-  { value: "6-8", label: "6-8 Ct." },
-  { value: "8-10", label: "8-10 Ct." },
-  { value: "10-15", label: "10-15 Ct." },
-  { value: "15-20", label: "15-20 Ct." },
-  { value: "20-25", label: "20-25 Ct." },
-  { value: "25+", label: "25+ Ct." },
+  { value: "", label: "All Weights", min: undefined as number | undefined, max: undefined as number | undefined },
+  { value: "0-2", label: "0-2 Ct.", min: 0, max: 2 },
+  { value: "2-4", label: "2-4 Ct.", min: 2, max: 4 },
+  { value: "4-6", label: "4-6 Ct.", min: 4, max: 6 },
+  { value: "6-8", label: "6-8 Ct.", min: 6, max: 8 },
+  { value: "8-10", label: "8-10 Ct.", min: 8, max: 10 },
+  { value: "10-15", label: "10-15 Ct.", min: 10, max: 15 },
+  { value: "15-20", label: "15-20 Ct.", min: 15, max: 20 },
+  { value: "20-25", label: "20-25 Ct.", min: 20, max: 25 },
+  { value: "25+", label: "25+ Ct.", min: 25, max: undefined },
 ];
 
 const SORT_OPTIONS = [
@@ -68,6 +72,7 @@ const PAGE_SIZE = 24;
 /* ── Helpers ───────────────────────────────────────────────── */
 
 function fmtPrice(n: number): string {
+  if (n == null || isNaN(n)) return "0.00";
   return n.toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
@@ -75,20 +80,45 @@ function fmtPrice(n: number): string {
 }
 
 function fmtNum(n: number, dec?: number): string {
+  if (isNaN(n)) return "0.00";
   return n.toLocaleString("en-US", {
     minimumFractionDigits: dec ?? 2,
     maximumFractionDigits: dec ?? 2,
   });
 }
 
-function countActiveFilters(filters: Record<string, string | boolean>): number {
+function countActiveFilters(filters: Record<string, string>): number {
   let n = 0;
   for (const key of Object.keys(filters)) {
     const v = filters[key];
-    const sv = String(v);
-    if (sv && sv !== "" && sv !== "false") n++;
+    if (v && v !== "") n++;
   }
   return n;
+}
+
+function parseWeightRange(range: string): { min?: number; max?: number } | null {
+  if (!range) return null;
+  const found = WEIGHT_RANGES.find((w) => w.value === range);
+  if (!found || found.value === "") return null;
+  return { min: found.min, max: found.max };
+}
+
+/** Human-readable label for a filter key+value pair */
+function filterLabel(key: string, value: string): string {
+  const keyLabels: Record<string, string> = {
+    shape: "Shape",
+    metalType: "Metal",
+    jewelryType: "Style",
+    weightRange: "Weight",
+    size: "Size",
+    clarity: "Clarity",
+  };
+  const label = keyLabels[key] || key;
+  if (key === "weightRange") {
+    const found = WEIGHT_RANGES.find((w) => w.value === value);
+    return found ? `Weight: ${found.label}` : `Weight: ${value}`;
+  }
+  return `${label}: ${value}`;
 }
 
 /* ── Inline Styles ─────────────────────────────────────────── */
@@ -126,6 +156,17 @@ const STYLES = {
     alignItems: "center",
     flexWrap: "wrap",
     padding: "8px 0",
+  } as React.CSSProperties,
+  filterChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "4px",
+    padding: "2px 8px",
+    borderRadius: "16px",
+    background: "var(--p-surface-hovered, #f1f1f1)",
+    fontSize: "12px",
+    cursor: "pointer",
+    border: "1px solid var(--p-border, #e1e3e5)",
   } as React.CSSProperties,
   productGrid: {
     display: "grid",
@@ -193,7 +234,7 @@ export default function CatalogPage() {
   const [sort, setSort] = useState("newest");
   const [page, setPage] = useState(1);
 
-  /* Pending filters (batch apply) */
+  /* Pending filters (batch apply) — no inHand/onMemo */
   const [filters, setFilters] = useState({
     shape: "",
     metalType: "",
@@ -201,8 +242,6 @@ export default function CatalogPage() {
     weightRange: "",
     size: "",
     clarity: "",
-    inHand: false,
-    onMemo: false,
   });
 
   /* Applied filters (what's actually sent to API) */
@@ -221,6 +260,11 @@ export default function CatalogPage() {
     pushed: 0,
     notPushed: 0,
     categories: [],
+    shapes: [],
+    metals: [],
+    styles: [],
+    sizes: [],
+    clarities: [],
   };
   const rawData = productsFetcher.data as ProductsData | null;
   const products: Product[] = Array.isArray(rawData?.products)
@@ -250,10 +294,23 @@ export default function CatalogPage() {
 
       const params = new URLSearchParams();
       if (cat) params.set("category", cat);
+
       for (const [k, v] of Object.entries(appliedFilters)) {
         const vs = String(v);
-        if (vs && vs !== "" && vs !== "false") params.set(k, vs);
+        if (vs && vs !== "") {
+          // Convert weightRange to diaWtMin/diaWtMax
+          if (k === "weightRange") {
+            const parsed = parseWeightRange(vs);
+            if (parsed) {
+              if (parsed.min !== undefined) params.set("diaWtMin", String(parsed.min));
+              if (parsed.max !== undefined) params.set("diaWtMax", String(parsed.max));
+            }
+          } else {
+            params.set(k, vs);
+          }
+        }
       }
+
       if (s) params.set("search", s);
       if (sort && sort !== "newest") params.set("sort", sort);
       params.set("page", String(pg));
@@ -279,15 +336,31 @@ export default function CatalogPage() {
     }
   }, [countsFetcher]);
 
-  /* Refresh counts after push */
+  /* Refresh counts + products after push */
   useEffect(() => {
     if (pushFetcher.data && pushFetcher.state === "idle") {
-      const result = pushFetcher.data as { success?: boolean; error?: string };
-      if (result.success) {
-        shopify.toast.show("Push started successfully");
-        countsFetcher.load("/api/catalog/counts");
-      } else if (result.error) {
+      const result = pushFetcher.data as {
+        jobId?: number;
+        pushedCount?: number;
+        failedCount?: number;
+        error?: string;
+      };
+      if (result.error) {
         shopify.toast.show(result.error, { isError: true });
+      } else if (result.pushedCount !== undefined) {
+        const total = (result.pushedCount || 0) + (result.failedCount || 0);
+        if (result.failedCount && result.failedCount > 0) {
+          shopify.toast.show(
+            `Pushed ${result.pushedCount} of ${total} products. ${result.failedCount} failed.`,
+            { isError: true },
+          );
+        } else {
+          shopify.toast.show(`Pushed ${result.pushedCount} products to Shopify`);
+        }
+        // Clear selections and reload everything
+        setSelections(new Set());
+        countsFetcher.load("/api/catalog/counts");
+        productsFetcher.load(buildProductsUrl());
       }
     }
   }, [pushFetcher.data, pushFetcher.state]);
@@ -399,8 +472,6 @@ export default function CatalogPage() {
       weightRange: "",
       size: "",
       clarity: "",
-      inHand: false,
-      onMemo: false,
     };
     setFilters(empty);
     setAppliedFilters(empty);
@@ -410,21 +481,32 @@ export default function CatalogPage() {
     setPage(1);
   };
 
+  /** Remove a single applied filter chip */
+  const handleRemoveFilter = (key: string) => {
+    const next = { ...appliedFilters, [key]: "" };
+    setFilters((prev) => ({ ...prev, [key]: "" }));
+    setAppliedFilters(next);
+    setPage(1);
+  };
+
   const handleCategoryClick = (cat: string) => {
     const newCat = activeCategory === cat ? "" : cat;
     setActiveCategory(newCat);
     setPage(1);
   };
 
-  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setSearch(e.target.value);
+  /** s-search-field fires onChange with debounced value */
+  const handleSearchChange = (e: Event) => {
+    const value = (e.target as HTMLInputElement).value;
+    setAppliedSearch(value);
+    setSearch(value);
+    setPage(1);
   };
 
-  const handleSearchKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      setAppliedSearch(search);
-      setPage(1);
-    }
+  /** s-select uses onInput for selection changes */
+  const handleFilterChange = (key: string) => (e: Event) => {
+    const value = (e.target as HTMLSelectElement).value;
+    setFilters((f) => ({ ...f, [key]: value }));
   };
 
   const handleSortChange = (e: Event) => {
@@ -468,14 +550,14 @@ export default function CatalogPage() {
           onClick={handleFetchProducts}
           {...(fetchLoading ? { loading: true } : { disabled: fetchLoading })}
         >
-          Fetch Products
+          Fetch
         </s-button>
         <s-button
           tone="neutral"
           onClick={handlePush}
           {...(pushLoading ? { loading: true } : { disabled: selections.size === 0 || pushLoading })}
         >
-          Push {selections.size > 0 ? selections.size : ""} to Store
+          Push{selections.size > 0 ? ` (${selections.size})` : ""} &#9654;
         </s-button>
       </s-stack>
     </div>
@@ -505,188 +587,162 @@ export default function CatalogPage() {
     );
   };
 
-  const renderFilterBar = () => (
-    <div>
+  const renderFilterBar = () => {
+    const shapes = Array.isArray(counts.shapes) ? counts.shapes : [];
+    const metals = Array.isArray(counts.metals) ? counts.metals : [];
+    const styles = Array.isArray(counts.styles) ? counts.styles : [];
+    const sizes = Array.isArray(counts.sizes) ? counts.sizes : [];
+    const clarities = Array.isArray(counts.clarities) ? counts.clarities : [];
+
+    return (
       <div style={STYLES.filterBar}>
+        {/* Shape */}
         <s-select
           label="Shape"
           name="shape"
           value={filters.shape}
-          onChange={(e: Event) =>
-            setFilters((f) => ({
-              ...f,
-              shape: (e.target as HTMLSelectElement).value,
-            }))
-          }
+          onInput={handleFilterChange("shape")}
         >
           <s-option value="">All Shapes</s-option>
-          {["Round", "Oval", "Pear", "Marquise", "Emerald", "Princess", "Cushion", "Radiant", "Heart"].map((s) => (
-            <s-option key={s} value={s} selected={filters.shape === s}>{s}</s-option>
+          {shapes.map((s) => (
+            <s-option key={s} value={s}>{s}</s-option>
           ))}
         </s-select>
 
+        {/* Metal */}
         <s-select
           label="Metal"
           name="metalType"
           value={filters.metalType}
-          onChange={(e: Event) =>
-            setFilters((f) => ({
-              ...f,
-              metalType: (e.target as HTMLSelectElement).value,
-            }))
-          }
+          onInput={handleFilterChange("metalType")}
         >
           <s-option value="">All Metals</s-option>
-          {["White Gold", "Yellow Gold", "Rose Gold", "Platinum", "Silver"].map((m) => (
-            <s-option key={m} value={m} selected={filters.metalType === m}>{m}</s-option>
+          {metals.map((m) => (
+            <s-option key={m} value={m}>{m}</s-option>
           ))}
         </s-select>
 
+        {/* Style (jewelryType) */}
         <s-select
           label="Style"
           name="jewelryType"
           value={filters.jewelryType}
-          onChange={(e: Event) =>
-            setFilters((f) => ({
-              ...f,
-              jewelryType: (e.target as HTMLSelectElement).value,
-            }))
-          }
+          onInput={handleFilterChange("jewelryType")}
         >
           <s-option value="">All Styles</s-option>
-          {["Ring", "Earring", "Pendant", "Bracelet", "Necklace"].map((j) => (
-            <s-option key={j} value={j} selected={filters.jewelryType === j}>{j}</s-option>
+          {styles.map((s) => (
+            <s-option key={s} value={s}>{s}</s-option>
           ))}
         </s-select>
 
+        {/* Weight (static buckets) */}
         <s-select
           label="Weight"
           name="weightRange"
           value={filters.weightRange}
-          onChange={(e: Event) =>
-            setFilters((f) => ({
-              ...f,
-              weightRange: (e.target as HTMLSelectElement).value,
-            }))
-          }
+          onInput={handleFilterChange("weightRange")}
         >
           {WEIGHT_RANGES.map((w) => (
-            <s-option
-              key={w.value}
-              value={w.value}
-              selected={filters.weightRange === w.value}
-            >
+            <s-option key={w.value} value={w.value}>
               {w.label}
             </s-option>
           ))}
         </s-select>
 
+        {/* Clarity */}
         <s-select
           label="Clarity"
           name="clarity"
           value={filters.clarity}
-          onChange={(e: Event) =>
-            setFilters((f) => ({
-              ...f,
-              clarity: (e.target as HTMLSelectElement).value,
-            }))
-          }
+          onInput={handleFilterChange("clarity")}
         >
           <s-option value="">All Clarities</s-option>
-          {["IF", "VVS1", "VVS2", "VS1", "VS2", "SI1", "SI2", "I1"].map((c) => (
-            <s-option key={c} value={c} selected={filters.clarity === c}>{c}</s-option>
+          {clarities.map((c) => (
+            <s-option key={c} value={c}>{c}</s-option>
           ))}
         </s-select>
-      </div>
 
-      <div style={STYLES.filterBar}>
+        {/* Size */}
         <s-select
           label="Size"
           name="size"
           value={filters.size}
-          onChange={(e: Event) =>
-            setFilters((f) => ({
-              ...f,
-              size: (e.target as HTMLSelectElement).value,
-            }))
-          }
+          onInput={handleFilterChange("size")}
         >
           <s-option value="">All Sizes</s-option>
-          {["4", "4.5", "5", "5.5", "6", "6.5", "7", "7.5", "8", "8.5", "9", "9.5", "10"].map((s) => (
-            <s-option key={s} value={s} selected={filters.size === s}>{s}</s-option>
+          {sizes.map((s) => (
+            <s-option key={s} value={s}>{s}</s-option>
           ))}
         </s-select>
 
-        <label style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "pointer" }}>
-          <s-checkbox
-            name="inHand"
-            checked={filters.inHand}
-            onChange={(e: Event) =>
-              setFilters((f) => ({
-                ...f,
-                inHand: (e.target as HTMLInputElement).checked,
-              }))
-            }
-          />
-          <s-text>In Hand</s-text>
-        </label>
-
-        <label style={{ display: "flex", alignItems: "center", gap: "4px", cursor: "pointer" }}>
-          <s-checkbox
-            name="onMemo"
-            checked={filters.onMemo}
-            onChange={(e: Event) =>
-              setFilters((f) => ({
-                ...f,
-                onMemo: (e.target as HTMLInputElement).checked,
-              }))
-            }
-          />
-          <s-text>On Memo</s-text>
-        </label>
-
+        {/* Search */}
         <s-search-field
           label="Search"
           name="search"
           value={search}
           placeholder="Search by SKU or name..."
-          onInput={(e: Event) =>
-            setSearch((e.target as HTMLInputElement).value)
-          }
-          onChange={(e: Event) => {
-            setSearch((e.target as HTMLInputElement).value);
-          }}
-          onKeyDown={handleSearchKeyDown}
+          onInput={(e: Event) => setSearch((e.target as HTMLInputElement).value)}
+          onChange={handleSearchChange}
         />
       </div>
-    </div>
-  );
+    );
+  };
+
+  const renderActiveFilterChips = () => {
+    const active = Object.entries(appliedFilters).filter(
+      ([, v]) => v && v !== ""
+    );
+    if (active.length === 0) return null;
+
+    return (
+      <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", padding: "4px 0 8px 0" }}>
+        <s-text color="subdued" style={{ fontSize: "12px", lineHeight: "24px" }}>
+          Active filters:
+        </s-text>
+        {active.map(([key, value]) => (
+          <div
+            key={key}
+            style={STYLES.filterChip}
+            onClick={() => handleRemoveFilter(key)}
+            title={`Remove ${filterLabel(key, value)}`}
+          >
+            <span>{filterLabel(key, value)}</span>
+            <span style={{ fontWeight: 700, fontSize: "14px" }}>&times;</span>
+          </div>
+        ))}
+        <div
+          style={{ ...STYLES.filterChip, fontWeight: 600 }}
+          onClick={handleClearFilters}
+          title="Clear all filters"
+        >
+          Clear All
+        </div>
+      </div>
+    );
+  };
 
   const renderActionBar = () => (
     <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", padding: "8px 0" }}>
-      <s-text color="subdued">{totalProducts} items</s-text>
+      <s-text color="subdued">{totalProducts.toLocaleString()} items</s-text>
       <s-button
         variant="tertiary"
         onClick={handleClearFilters}
         disabled={activeFilterCount === 0 && !activeCategory && !appliedSearch}
       >
-        Clear Filter
+        Clear
       </s-button>
       <s-button onClick={handleApplyFilters}>
-        Apply Filter
-        {activeFilterCount > 0 && (
-          <> ({activeFilterCount})</>
-        )}
+        Apply{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
       </s-button>
       <s-select
         label="Sort"
         name="sort"
         value={sort}
-        onChange={handleSortChange}
+        onInput={handleSortChange}
         style={{ marginLeft: "auto", width: "200px" }}
       >
         {SORT_OPTIONS.map((o) => (
-          <s-option key={o.value} value={o.value} selected={sort === o.value}>
+          <s-option key={o.value} value={o.value}>
             {o.label}
           </s-option>
         ))}
@@ -711,10 +767,10 @@ export default function CatalogPage() {
   const renderBulkActions = () => (
     <div style={{ display: "flex", gap: "8px", alignItems: "center", padding: "8px 0", flexWrap: "wrap" }}>
       <s-button variant="tertiary" onClick={handleSelectAll} disabled={isAnyLoading}>
-        Select All Visible
+        Select All
       </s-button>
       <s-button variant="tertiary" onClick={handleDeselectAll} disabled={isAnyLoading}>
-        Deselect All
+        Deselect
       </s-button>
       <s-button
         tone="neutral"
@@ -722,7 +778,7 @@ export default function CatalogPage() {
         disabled={selections.size === 0 || pushLoading}
         {...(pushLoading ? { loading: true } : {})}
       >
-        Push Selected ({selections.size}) &#9654;
+        Push ({selections.size}) &#9654;
       </s-button>
       <s-button variant="tertiary" onClick={handleExport} disabled={isAnyLoading}>
         Export CSV
@@ -739,7 +795,7 @@ export default function CatalogPage() {
         <div style={{ position: "relative" }}>
           <img
             src={product.image1 || ""}
-            alt={product.name || "Product"}
+            alt={"Product"}
             style={STYLES.productImage}
             onError={(e) => {
               (e.target as HTMLImageElement).style.display = "none";
@@ -773,13 +829,13 @@ export default function CatalogPage() {
             {product.clarity && <s-badge tone="info">{product.clarity}</s-badge>}
           </div>
           <div style={{ marginTop: "8px" }}>
-            {product.diaCts > 0 && (
+            {parseFloat(product.diaWt) > 0 && (
               <s-text color="subdued" style={{ display: "block" }}>
-                DIA {fmtNum(product.diaCts)} CTS
+                DIA {fmtNum(parseFloat(product.diaWt))} CTS
               </s-text>
             )}
             <s-text color="subdued" style={{ display: "block" }}>
-              Gross Weight {fmtNum(product.grossWeight)}
+              Gross Weight {fmtNum(parseFloat(product.grossWt))}
             </s-text>
             <s-text
               fontVariantNumeric="tabular-nums"
@@ -827,7 +883,7 @@ export default function CatalogPage() {
             <s-table-cell>
               <s-thumbnail
                 src={product.image1 || ""}
-                alt={product.name || "Product"}
+                alt={"Product"}
                 size="small-200"
               />
             </s-table-cell>
@@ -839,7 +895,7 @@ export default function CatalogPage() {
             <s-table-cell>{[product.jewelryType, product.category, product.metalType, product.shape].filter(Boolean).join(" ")}</s-table-cell>
             <s-table-cell>{product.category}</s-table-cell>
             <s-table-cell>{product.metalType}</s-table-cell>
-            <s-table-cell>{fmtNum(product.grossWeight)}</s-table-cell>
+            <s-table-cell>{fmtNum(parseFloat(product.grossWt))}</s-table-cell>
             <s-table-cell>{product.size}</s-table-cell>
             <s-table-cell>
               <s-text tone="success" type="strong">${fmtPrice(product.price)}</s-text>
@@ -866,7 +922,7 @@ export default function CatalogPage() {
         disabled={page <= 1 || isAnyLoading}
         onClick={() => setPageSafe(page - 1)}
       >
-        Previous
+        &#9664; Previous
       </s-button>
       <s-text>
         Page {page} of {totalPages}
@@ -876,7 +932,7 @@ export default function CatalogPage() {
         disabled={page >= totalPages || isAnyLoading}
         onClick={() => setPageSafe(page + 1)}
       >
-        Next
+        Next &#9654;
       </s-button>
     </div>
   );
@@ -893,6 +949,9 @@ export default function CatalogPage() {
 
       {/* Filter bar */}
       {renderFilterBar()}
+
+      {/* Active filter chips */}
+      {renderActiveFilterChips()}
 
       {/* Action bar */}
       {renderActionBar()}
@@ -922,8 +981,23 @@ export default function CatalogPage() {
           <s-stack direction="block" gap="base">
             <s-text type="strong">Welcome to Jewel Catalog</s-text>
             <s-text color="subdued">
-              Click <s-text type="strong">Fetch Products</s-text> to load your
-              supplier inventory.
+              Go to{" "}
+              <a
+                href="/app/settings"
+                style={{
+                  color: "var(--p-interactive, #2c6ecb)",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  window.location.href = "/app/settings";
+                }}
+              >
+                Settings
+              </a>{" "}
+              to configure your supplier API key, then come back and click{" "}
+              <s-text type="strong">Fetch</s-text> to load your catalog.
             </s-text>
           </s-stack>
         </s-section>

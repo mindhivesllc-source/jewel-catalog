@@ -1,17 +1,16 @@
 /**
- * Shopify Admin API helpers.
+ * Shopify Admin API helpers — 2026-04 product model.
  *
- * Self-contained — does not import from other application services.
- * The `Admin` type is the object returned by `shopify.authenticate.admin(request)`.
+ * productUpdate: product:{id, ...} (id inside input, NOT as separate arg)
+ * Media: CreateMediaInput type
+ * productVariantsBulkUpdate: variants:[{id:, price:}], no SKU directly
+ * For SKU + pricing in one shot: productSet(product:{id, variants:[{id, price, sku}]})
  */
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface Admin {
-  graphql: (
-    query: string,
-    opts?: { variables?: Record<string, unknown> },
-  ) => Promise<Response>;
+  graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response>;
 }
 
 interface UserError {
@@ -19,216 +18,184 @@ interface UserError {
   message: string;
 }
 
-interface MutationResult<T> {
-  userErrors: UserError[];
-  product?: T;
-}
+// ── Create product ───────────────────────────────────────────────────────────
 
-// ── Product CRUD ─────────────────────────────────────────────────────────────
-
-interface ProductPayload {
-  id: string;
-  title: string;
-}
-
-/**
- * Create a new Shopify product via GraphQL.
- */
 export async function createProduct(
   admin: Admin,
   input: Record<string, unknown>,
 ): Promise<{ id: string; title: string }> {
   const query = `#graphql
-    mutation productCreate($input: ProductInput!) {
-      productCreate(input: $input) {
-        userErrors {
-          field
-          message
-        }
-        product {
-          id
-          title
-        }
+    mutation productCreate($product: ProductCreateInput!) {
+      productCreate(product: $product) {
+        userErrors { field message }
+        product { id title }
       }
     }
   `;
+  const res = await admin.graphql(query, { variables: { product: input } });
+  const body = (await res.json()) as { data?: { productCreate: { userErrors?: UserError[]; product?: { id: string; title: string } } }; errors?: unknown };
 
-  const res = await admin.graphql(query, { variables: { input } });
-  const body = (await res.json()) as {
-    data?: { productCreate: MutationResult<ProductPayload> };
-    errors?: unknown;
-  };
-
-  if (body.errors) {
-    throw new Error(
-      `GraphQL errors creating product: ${JSON.stringify(body.errors)}`,
-    );
-  }
-
-  const result = body.data?.productCreate;
-  if (!result) {
-    throw new Error("No data returned from productCreate mutation");
-  }
-
-  if (result.userErrors && result.userErrors.length > 0) {
-    throw new Error(
-      `User errors creating product: ${JSON.stringify(result.userErrors)}`,
-    );
-  }
-
-  if (!result.product) {
-    throw new Error("productCreate mutation returned no product");
-  }
-
-  return { id: result.product.id, title: result.product.title };
+  if (body.errors) throw new Error(`productCreate errors: ${JSON.stringify(body.errors)}`);
+  const r = body.data?.productCreate;
+  if (!r) throw new Error("No productCreate data");
+  if (r.userErrors?.length) throw new Error(`productCreate userErrors: ${JSON.stringify(r.userErrors)}`);
+  if (!r.product) throw new Error("No product returned");
+  return r.product;
 }
 
-/**
- * Update an existing Shopify product via GraphQL.
- */
+// ── Update product ───────────────────────────────────────────────────────────
+// productUpdate argument is "product:{...}" not "id:..."! ID goes INSIDE the input.
+
 export async function updateProduct(
   admin: Admin,
   productId: string,
   input: Record<string, unknown>,
 ): Promise<{ id: string; title: string }> {
   const query = `#graphql
-    mutation productUpdate($productId: ID!, $input: ProductInput!) {
-      productUpdate(input: $input, id: $productId) {
-        userErrors {
-          field
-          message
-        }
-        product {
-          id
-          title
-        }
+    mutation productUpdate($product: ProductUpdateInput!) {
+      productUpdate(product: $product) {
+        userErrors { field message }
+        product { id title }
+      }
+    }
+  `;
+  const body_input = { ...input, id: productId };
+  const res = await admin.graphql(query, { variables: { product: body_input } });
+  const body = (await res.json()) as { data?: { productUpdate: { userErrors?: UserError[]; product?: { id: string; title: string } } }; errors?: unknown };
+
+  if (body.errors) throw new Error(`productUpdate errors: ${JSON.stringify(body.errors)}`);
+  const r = body.data?.productUpdate;
+  if (!r) throw new Error("No productUpdate data");
+  if (r.userErrors?.length) throw new Error(`productUpdate userErrors: ${JSON.stringify(r.userErrors)}`);
+  if (!r.product) throw new Error("No product returned");
+  return r.product;
+}
+
+// ── Set product (can update base fields + variant pricing in one call) ──────
+
+export async function setProductWithPricing(
+  admin: Admin,
+  productId: string,
+  productFields: Record<string, unknown>,
+  variantPrice: { price: string; compareAtPrice?: string | null },
+): Promise<void> {
+  // First get the variant ID
+  const getQuery = `#graphql
+    query gv($id: ID!) { product(id: $id) { variants(first:1) { edges { node { id } } } } }
+  `;
+  const getRes = await admin.graphql(getQuery, { variables: { id: productId } });
+  const getBody = (await getRes.json()) as { data?: { product?: { variants?: { edges?: { node: { id: string } }[] } } } };
+
+  const variantId = getBody.data?.product?.variants?.edges?.[0]?.node?.id;
+  if (!variantId) {
+    console.warn("[push] No variant ID found for pricing — skipping price set");
+    return;
+  }
+
+  const query = `#graphql
+    mutation productSet($input: ProductSetInput!) {
+      productSet(input: $input) {
+        userErrors { field message }
+        product { id }
       }
     }
   `;
 
-  const res = await admin.graphql(query, {
-    variables: { productId, input },
-  });
-  const body = (await res.json()) as {
-    data?: { productUpdate: MutationResult<ProductPayload> };
-    errors?: unknown;
+  const input: Record<string, unknown> = {
+    id: productId,
+    ...productFields,
+    variants: [{
+      id: variantId,
+      price: variantPrice.price,
+      ...(variantPrice.compareAtPrice ? { compareAtPrice: variantPrice.compareAtPrice } : {}),
+    }],
   };
 
-  if (body.errors) {
-    throw new Error(
-      `GraphQL errors updating product: ${JSON.stringify(body.errors)}`,
-    );
-  }
+  const res = await admin.graphql(query, { variables: { input } });
+  const body = (await res.json()) as { data?: { productSet?: { userErrors?: UserError[] } }; errors?: unknown };
 
-  const result = body.data?.productUpdate;
-  if (!result) {
-    throw new Error("No data returned from productUpdate mutation");
+  if (body.errors) throw new Error(`productSet errors: ${JSON.stringify(body.errors)}`);
+  if (body.data?.productSet?.userErrors?.length) {
+    throw new Error(`productSet userErrors: ${JSON.stringify(body.data.productSet.userErrors)}`);
   }
-
-  if (result.userErrors && result.userErrors.length > 0) {
-    throw new Error(
-      `User errors updating product: ${JSON.stringify(result.userErrors)}`,
-    );
-  }
-
-  if (!result.product) {
-    throw new Error("productUpdate mutation returned no product");
-  }
-
-  return { id: result.product.id, title: result.product.title };
 }
 
-// ── Product lookup by supplier metafields ────────────────────────────────────
+// ── Media ────────────────────────────────────────────────────────────────────
 
-interface MetafieldEdge {
-  node: {
-    id: string;
-    namespace: string;
-    key: string;
-    value: string;
-  };
-}
-
-/**
- * Find a Shopify product by its LGD supplier metafields.
- * Returns `null` when no matching product exists.
- */
-export async function findProductBySupplierId(
+export async function appendProductMedia(
   admin: Admin,
-  supplierId: string,
-  supplierSku: string,
+  productId: string,
+  media: { mediaContentType: string; originalSource: string; alt?: string }[],
+): Promise<void> {
+  if (media.length === 0) return;
+  const query = `#graphql
+    mutation pam($productId: ID!, $media: [CreateMediaInput!]) {
+      productUpdateMedia(productId: $productId, media: $media) {
+        userErrors { field message }
+      }
+    }
+  `;
+  const res = await admin.graphql(query, { variables: { productId, media } });
+  const body = (await res.json()) as { data?: { productUpdateMedia?: { userErrors?: UserError[] } }; errors?: unknown };
+  if (body.errors) console.error(`[push] Media error: ${JSON.stringify(body.errors)}`);
+  else if (body.data?.productUpdateMedia?.userErrors?.length) {
+    console.error(`[push] Media userErrors: ${JSON.stringify(body.data.productUpdateMedia.userErrors)}`);
+  }
+}
+
+// ── Metafields ───────────────────────────────────────────────────────────────
+
+export async function setProductMetafields(
+  admin: Admin,
+  productId: string,
+  metafields: { namespace: string; key: string; value: string; type: string }[],
+): Promise<void> {
+  if (metafields.length === 0) return;
+  const inputs = metafields.map(mf => ({ ...mf, ownerId: productId }));
+  const query = `#graphql
+    mutation ms($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        userErrors { field message }
+      }
+    }
+  `;
+  const res = await admin.graphql(query, { variables: { metafields: inputs } });
+  const body = (await res.json()) as { data?: { metafieldsSet?: { userErrors?: UserError[] } }; errors?: unknown };
+  if (body.errors) console.error(`[push] Metafield error: ${JSON.stringify(body.errors)}`);
+  else if (body.data?.metafieldsSet?.userErrors?.length) {
+    console.error(`[push] Metafield userErrors: ${JSON.stringify(body.data.metafieldsSet.userErrors)}`);
+  }
+}
+
+// ── Lookup ───────────────────────────────────────────────────────────────────
+
+export async function findProductBySupplierId(
+  admin: Admin, supplierId: string, supplierSku: string,
 ): Promise<{ id: string; title: string } | null> {
   const query = `#graphql
-    query findProductBySupplier($query: String!) {
+    query fps($query: String!) {
       products(first: 5, query: $query) {
         edges {
           node {
-            id
-            title
+            id title
             metafields(first: 10, namespace: "lgd_supplier") {
-              edges {
-                node {
-                  id
-                  namespace
-                  key
-                  value
-                }
-              }
+              edges { node { namespace key value } }
             }
           }
         }
       }
     }
   `;
+  const res = await admin.graphql(query, { variables: { query: `lgd_supplier:supplier_id:${supplierId}` } });
+  const body = (await res.json()) as { data?: { products?: { edges?: { node: { id: string; title: string; metafields?: { edges?: { node: { namespace: string; key: string; value: string } }[] } } }[] } }; errors?: unknown };
 
-  // Search using Shopify's product query syntax on the supplier_id metafield
-  const searchQuery = `lgd_supplier:supplier_id:${supplierId}`;
-
-  const res = await admin.graphql(query, {
-    variables: { query: searchQuery },
-  });
-  const body = (await res.json()) as {
-    data?: {
-      products?: {
-        edges?: {
-          node: {
-            id: string;
-            title: string;
-            metafields?: { edges?: MetafieldEdge[] };
-          };
-        }[];
-      };
-    };
-    errors?: unknown;
-  };
-
-  if (body.errors) {
-    throw new Error(
-      `GraphQL errors searching product: ${JSON.stringify(body.errors)}`,
-    );
-  }
-
-  const edges = body.data?.products?.edges ?? [];
-
-  for (const edge of edges) {
-    const metafieldEdges = edge.node.metafields?.edges ?? [];
-    const hasSupplierId = metafieldEdges.some(
-      (mf) =>
-        mf.node.namespace === "lgd_supplier" &&
-        mf.node.key === "supplier_id" &&
-        mf.node.value === supplierId,
-    );
-    const hasSupplierSku = metafieldEdges.some(
-      (mf) =>
-        mf.node.namespace === "lgd_supplier" &&
-        mf.node.key === "supplier_sku" &&
-        mf.node.value === supplierSku,
-    );
-
-    if (hasSupplierId && hasSupplierSku) {
+  if (body.errors) throw new Error(`findProduct errors: ${JSON.stringify(body.errors)}`);
+  for (const edge of body.data?.products?.edges ?? []) {
+    const mfs = edge.node.metafields?.edges ?? [];
+    if (mfs.some(m => m.node.namespace==="lgd_supplier" && m.node.key==="supplier_id" && m.node.value===supplierId) &&
+        mfs.some(m => m.node.namespace==="lgd_supplier" && m.node.key==="supplier_sku" && m.node.value===supplierSku)) {
       return { id: edge.node.id, title: edge.node.title };
     }
   }
-
   return null;
 }

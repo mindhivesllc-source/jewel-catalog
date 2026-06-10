@@ -21,8 +21,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
 
     return data({
-      ...settings,
-      supplierApiKey: maskApiKey(settings.supplierApiKey),
+      apiKey: maskApiKey(settings.supplierApiKey),
+      vendor: settings.vendor,
+      compareAtRule: settings.compareAtPriceRule,
+      compareAtMultiplier: settings.compareAtMultiplier,
+      compareAtFixed: settings.compareAtFixed,
+      defaultLocationId: settings.defaultLocationId,
+      lastFetchTimestamp: settings.lastFetchAt,
     });
   } catch (err: any) {
     return data(
@@ -93,8 +98,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
 
     return data({
-      ...settings,
-      supplierApiKey: maskApiKey(settings.supplierApiKey),
+      apiKey: maskApiKey(settings.supplierApiKey),
+      vendor: settings.vendor,
+      compareAtRule: settings.compareAtPriceRule,
+      compareAtMultiplier: settings.compareAtMultiplier,
+      compareAtFixed: settings.compareAtFixed,
+      defaultLocationId: settings.defaultLocationId,
+      lastFetchTimestamp: settings.lastFetchAt,
     });
   } catch (err: any) {
     return data(
