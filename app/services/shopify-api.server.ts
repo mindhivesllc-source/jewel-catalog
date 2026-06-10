@@ -179,6 +179,12 @@ export async function setProductMetafields(
 export async function findProductBySupplierId(
   admin: Admin, supplierId: string, supplierSku: string,
 ): Promise<{ id: string; title: string } | null> {
+  // Best-effort fallback only. The local ShopifyProductMapping table is the
+  // primary dedup source; this lookup catches products that exist in Shopify
+  // but are missing from our mapping (e.g. re-imported store). Searching by an
+  // arbitrary metafield value requires a searchable metafield definition, which
+  // we don't guarantee, so any failure here must NOT abort the push — we just
+  // return null and let the caller create the product.
   const query = `#graphql
     query fps($query: String!) {
       products(first: 5, query: $query) {
@@ -193,16 +199,27 @@ export async function findProductBySupplierId(
       }
     }
   `;
-  const res = await admin.graphql(query, { variables: { query: `lgd_supplier:supplier_id:${supplierId}` } });
-  const body = (await res.json()) as { data?: { products?: { edges?: { node: { id: string; title: string; metafields?: { edges?: { node: { namespace: string; key: string; value: string } }[] } } }[] } }; errors?: unknown };
+  try {
+    // Correct search syntax: metafields.<namespace>.<key>:<value>
+    const res = await admin.graphql(query, {
+      variables: { query: `metafields.lgd_supplier.supplier_id:${supplierId}` },
+    });
+    const body = (await res.json()) as { data?: { products?: { edges?: { node: { id: string; title: string; metafields?: { edges?: { node: { namespace: string; key: string; value: string } }[] } } }[] } }; errors?: unknown };
 
-  if (body.errors) throw new Error(`findProduct errors: ${JSON.stringify(body.errors)}`);
-  for (const edge of body.data?.products?.edges ?? []) {
-    const mfs = edge.node.metafields?.edges ?? [];
-    if (mfs.some(m => m.node.namespace==="lgd_supplier" && m.node.key==="supplier_id" && m.node.value===supplierId) &&
-        mfs.some(m => m.node.namespace==="lgd_supplier" && m.node.key==="supplier_sku" && m.node.value===supplierSku)) {
-      return { id: edge.node.id, title: edge.node.title };
+    if (body.errors) {
+      console.warn(`[push] findProduct lookup skipped (query error): ${JSON.stringify(body.errors)}`);
+      return null;
     }
+    for (const edge of body.data?.products?.edges ?? []) {
+      const mfs = edge.node.metafields?.edges ?? [];
+      if (mfs.some(m => m.node.namespace==="lgd_supplier" && m.node.key==="supplier_id" && m.node.value===supplierId) &&
+          mfs.some(m => m.node.namespace==="lgd_supplier" && m.node.key==="supplier_sku" && m.node.value===supplierSku)) {
+        return { id: edge.node.id, title: edge.node.title };
+      }
+    }
+    return null;
+  } catch (err: any) {
+    console.warn(`[push] findProduct lookup failed, proceeding to create: ${err?.message ?? err}`);
+    return null;
   }
-  return null;
 }
