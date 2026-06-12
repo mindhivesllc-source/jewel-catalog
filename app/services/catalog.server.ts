@@ -44,18 +44,24 @@ export async function fetchAndStoreCatalog(
 
   let upserted = 0;
 
-  for (const item of items) {
-    const row = supplierItemToDbRow(item, shop);
-
-    await prisma.supplierProduct.upsert({
-      where: {
-        shop_stockNo: { shop, stockNo: row.stockNo },
-      },
-      create: row,
-      update: row,
-    });
-
-    upserted++;
+  // Batch upserts in transactions of 50 to avoid ~1900 sequential
+  // round-trips to Postgres.
+  const BATCH = 50;
+  for (let i = 0; i < items.length; i += BATCH) {
+    const batch = items.slice(i, i + BATCH);
+    await prisma.$transaction(
+      batch.map((item) => {
+        const row = supplierItemToDbRow(item, shop);
+        return prisma.supplierProduct.upsert({
+          where: {
+            shop_stockNo: { shop, stockNo: row.stockNo },
+          },
+          create: row,
+          update: row,
+        });
+      }),
+    );
+    upserted += batch.length;
   }
 
   // Update shop settings last-fetch timestamp
@@ -204,10 +210,12 @@ function buildWhere(
   // Free-text search across stockNo, subitem, remarks
   if (filters.search && filters.search.trim().length > 0) {
     const term = filters.search.trim();
+    // mode: "insensitive" — Postgres `contains` is case-sensitive by default
+    // (SQLite was not), so without it searches like "ring" miss "Ring".
     where.OR = [
-      { stockNo: { contains: term } },
-      { subitem: { contains: term } },
-      { remarks: { contains: term } },
+      { stockNo: { contains: term, mode: "insensitive" } },
+      { subitem: { contains: term, mode: "insensitive" } },
+      { remarks: { contains: term, mode: "insensitive" } },
     ];
   }
 

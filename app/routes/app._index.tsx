@@ -219,6 +219,7 @@ export default function CatalogPage() {
   const productsFetcher = useFetcher<ProductsData>();
   const selectFetcher = useFetcher();
   const pushFetcher = useFetcher();
+  const pushStatusFetcher = useFetcher();
   const fetchFetcher = useFetcher();
 
   /* ── State ──────────────────────────────────────────────── */
@@ -253,6 +254,14 @@ export default function CatalogPage() {
   /* Did we ever fetch? */
   const [hasFetched, setHasFetched] = useState(false);
 
+  /* Background push job being polled (null = no push running) */
+  const [activePushJobId, setActivePushJobId] = useState<number | null>(null);
+  const [pushProgress, setPushProgress] = useState<{
+    pushed: number;
+    failed: number;
+    total: number;
+  } | null>(null);
+
   /* ── Derived ────────────────────────────────────────────── */
   const counts: CountsData = countsFetcher.data || {
     total: 0,
@@ -278,7 +287,8 @@ export default function CatalogPage() {
   const countsLoading =
     ["loading", "submitting"].includes(countsFetcher.state);
   const pushLoading =
-    ["loading", "submitting"].includes(pushFetcher.state);
+    ["loading", "submitting"].includes(pushFetcher.state) ||
+    activePushJobId !== null;
   const fetchLoading =
     ["loading", "submitting"].includes(fetchFetcher.state);
   const isAnyLoading = productsLoading || pushLoading || fetchLoading;
@@ -336,34 +346,134 @@ export default function CatalogPage() {
     }
   }, [countsFetcher]);
 
-  /* Refresh counts + products after push */
+  /* On mount, check whether a push is already running (e.g. page reload
+     mid-push) and resume polling it */
+  useEffect(() => {
+    if (pushStatusFetcher.state === "idle" && pushStatusFetcher.data == null) {
+      pushStatusFetcher.load("/api/push/status");
+    }
+  }, [pushStatusFetcher]);
+
+  /* Adopt a running job reported by the status endpoint */
+  useEffect(() => {
+    if (activePushJobId !== null) return;
+    const status = pushStatusFetcher.data as
+      | {
+          active?: {
+            id: number;
+            pushedCount: number;
+            failedCount: number;
+            totalSelected: number;
+          } | null;
+        }
+      | undefined;
+    if (status?.active) {
+      setActivePushJobId(status.active.id);
+      setPushProgress({
+        pushed: status.active.pushedCount,
+        failed: status.active.failedCount,
+        total: status.active.totalSelected,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pushStatusFetcher.data]);
+
+  /* Push now starts a background job — kick off polling when it begins */
   useEffect(() => {
     if (pushFetcher.data && pushFetcher.state === "idle") {
       const result = pushFetcher.data as {
-        jobId?: number;
-        pushedCount?: number;
-        failedCount?: number;
+        jobId?: number | null;
+        totalSelected?: number;
+        started?: boolean;
+        message?: string;
         error?: string;
       };
       if (result.error) {
         shopify.toast.show(result.error, { isError: true });
-      } else if (result.pushedCount !== undefined) {
-        const total = (result.pushedCount || 0) + (result.failedCount || 0);
-        if (result.failedCount && result.failedCount > 0) {
-          shopify.toast.show(
-            `Pushed ${result.pushedCount} of ${total} products. ${result.failedCount} failed.`,
-            { isError: true },
-          );
-        } else {
-          shopify.toast.show(`Pushed ${result.pushedCount} products to Shopify`);
-        }
-        // Clear selections and reload everything
-        setSelections(new Set());
-        countsFetcher.load("/api/catalog/counts");
-        productsFetcher.load(buildProductsUrl());
+      } else if (result.started && result.jobId) {
+        setActivePushJobId(result.jobId);
+        setPushProgress({
+          pushed: 0,
+          failed: 0,
+          total: result.totalSelected || 0,
+        });
+        shopify.toast.show(
+          `Pushing ${result.totalSelected} products to Shopify…`,
+        );
+      } else if (result.message) {
+        shopify.toast.show(result.message);
       }
     }
   }, [pushFetcher.data, pushFetcher.state]);
+
+  /* Poll job status while a push is running */
+  useEffect(() => {
+    if (activePushJobId === null) return;
+    const interval = setInterval(() => {
+      if (pushStatusFetcher.state === "idle") {
+        pushStatusFetcher.load("/api/push/status");
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePushJobId]);
+
+  /* Handle poll results: update progress, detect completion */
+  useEffect(() => {
+    if (activePushJobId === null || !pushStatusFetcher.data) return;
+    const status = pushStatusFetcher.data as {
+      active?: {
+        id: number;
+        pushedCount: number;
+        failedCount: number;
+        totalSelected: number;
+      } | null;
+      recent?: {
+        id: number;
+        status: string;
+        pushedCount: number;
+        failedCount: number;
+        totalSelected: number;
+        errorMessage?: string | null;
+      } | null;
+    };
+
+    if (status.active && status.active.id === activePushJobId) {
+      setPushProgress({
+        pushed: status.active.pushedCount,
+        failed: status.active.failedCount,
+        total: status.active.totalSelected,
+      });
+      return;
+    }
+
+    // Only conclude when the poll actually reports our job as the most
+    // recent one — otherwise this is stale data from before the job started.
+    const done =
+      status.recent && status.recent.id === activePushJobId
+        ? status.recent
+        : null;
+    if (!done) return;
+
+    setActivePushJobId(null);
+    setPushProgress(null);
+
+    if (done.status === "FAILED" || done.failedCount > 0) {
+      shopify.toast.show(
+        `Pushed ${done.pushedCount} of ${done.totalSelected} products. ${done.failedCount} failed.` +
+          (done.errorMessage ? ` ${done.errorMessage}` : ""),
+        { isError: true },
+      );
+    } else {
+      shopify.toast.show(`Pushed ${done.pushedCount} products to Shopify`);
+    }
+
+    // Clear selections and reload everything
+    setSelections(new Set());
+    countsFetcher.load("/api/catalog/counts");
+    productsFetcher.load(buildProductsUrl());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pushStatusFetcher.data, activePushJobId]);
 
   /* Refresh products after fetch triggers */
   useEffect(() => {
@@ -557,7 +667,9 @@ export default function CatalogPage() {
           onClick={handlePush}
           {...(pushLoading ? { loading: true } : { disabled: selections.size === 0 || pushLoading })}
         >
-          Push{selections.size > 0 ? ` (${selections.size})` : ""} &#9654;
+          {pushProgress
+            ? `Pushing ${pushProgress.pushed + pushProgress.failed}/${pushProgress.total}…`
+            : `Push${selections.size > 0 ? ` (${selections.size})` : ""} ▶`}
         </s-button>
       </s-stack>
     </div>
@@ -778,7 +890,9 @@ export default function CatalogPage() {
         disabled={selections.size === 0 || pushLoading}
         {...(pushLoading ? { loading: true } : {})}
       >
-        Push ({selections.size}) &#9654;
+        {pushProgress
+          ? `Pushing ${pushProgress.pushed + pushProgress.failed}/${pushProgress.total}…`
+          : `Push (${selections.size}) ▶`}
       </s-button>
       <s-button variant="tertiary" onClick={handleExport} disabled={isAnyLoading}>
         Export CSV

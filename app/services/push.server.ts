@@ -33,6 +33,11 @@ export interface PushResults {
   failedCount: number;
 }
 
+export interface PushStart {
+  jobId: number;
+  totalSelected: number;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -85,16 +90,20 @@ function toGraphQLInput(
 
 // ── Push ─────────────────────────────────────────────────────────────────────
 
+// A job RUNNING for longer than this was interrupted (e.g. server restart)
+// and would otherwise block new pushes forever.
+const STALE_JOB_MS = 30 * 60 * 1000;
+
 /**
- * Push all selected (and not-yet-pushed) products to Shopify.
- * Returns detailed per-product results.
+ * Validate settings/selection, create a PushJob row and run the actual push
+ * in the background. Returns immediately so the HTTP request that triggered
+ * the push never waits on hundreds of Shopify API calls — the UI polls
+ * /api/push/status for progress instead.
  */
-export async function pushSelectedProducts(
+export async function startPushJob(
   shop: string,
   admin: Admin,
-  signal?: AbortSignal,
-): Promise<PushResults> {
-  // Load shop settings
+): Promise<PushStart> {
   const settings = await prisma.shopSettings.findUnique({
     where: { shop },
   });
@@ -105,6 +114,28 @@ export async function pushSelectedProducts(
     );
   }
 
+  await prisma.pushJob.updateMany({
+    where: {
+      shop,
+      status: "RUNNING",
+      startedAt: { lt: new Date(Date.now() - STALE_JOB_MS) },
+    },
+    data: {
+      status: "FAILED",
+      completedAt: new Date(),
+      errorMessage: "Interrupted (server restarted during push)",
+    },
+  });
+
+  const running = await prisma.pushJob.findFirst({
+    where: { shop, status: "RUNNING" },
+  });
+  if (running) {
+    throw new Error(
+      "A push is already running for this shop. Wait for it to finish before starting another.",
+    );
+  }
+
   // Find all selected products that haven't been pushed yet
   const products = await prisma.supplierProduct.findMany({
     where: { shop, selected: true, pushed: false },
@@ -112,15 +143,9 @@ export async function pushSelectedProducts(
   });
 
   if (products.length === 0) {
-    return {
-      jobId: 0,
-      results: [],
-      pushedCount: 0,
-      failedCount: 0,
-    };
+    return { jobId: 0, totalSelected: 0 };
   }
 
-  // Create push job
   const job = await prisma.pushJob.create({
     data: {
       shop,
@@ -132,6 +157,44 @@ export async function pushSelectedProducts(
     },
   });
 
+  void runPushJob(shop, admin, job.id, products, settings).catch(
+    async (err) => {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      console.error(`[push] Job ${job.id} crashed: ${message}`);
+      await prisma.pushJob
+        .update({
+          where: { id: job.id },
+          data: {
+            status: "FAILED",
+            completedAt: new Date(),
+            errorMessage: message,
+          },
+        })
+        .catch(() => {});
+    },
+  );
+
+  return { jobId: job.id, totalSelected: products.length };
+}
+
+type SupplierProductRow = Awaited<
+  ReturnType<typeof prisma.supplierProduct.findMany>
+>[number];
+type ShopSettingsRow = NonNullable<
+  Awaited<ReturnType<typeof prisma.shopSettings.findUnique>>
+>;
+
+/**
+ * The actual push loop. Runs detached from any HTTP request; progress is
+ * persisted on the PushJob row after every product.
+ */
+async function runPushJob(
+  shop: string,
+  admin: Admin,
+  jobId: number,
+  products: SupplierProductRow[],
+  settings: ShopSettingsRow,
+): Promise<PushResults> {
   const results: PushResultRow[] = [];
   let pushedCount = 0;
   let failedCount = 0;
@@ -145,31 +208,6 @@ export async function pushSelectedProducts(
   const compareAtFixed = settings.compareAtFixed || 0;
 
   for (const product of products) {
-    // Respect abort signal
-    if (signal?.aborted) {
-      await prisma.pushLog.create({
-        data: {
-          shop,
-          jobId: job.id,
-          level: "warn",
-          message: "Push aborted by user",
-          stockNo: product.stockNo,
-        },
-      });
-
-      await prisma.pushJob.update({
-        where: { id: job.id },
-        data: {
-          status: "FAILED",
-          completedAt: new Date(),
-          pushedCount,
-          failedCount,
-          errorMessage: "Aborted by user",
-        },
-      });
-      break;
-    }
-
     try {
       // Reconstruct the supplier item from the DB row
       const supplierItem = dbRowToSupplierItem(product as unknown as Record<string, unknown>);
@@ -315,7 +353,7 @@ export async function pushSelectedProducts(
       await prisma.pushLog.create({
         data: {
           shop,
-          jobId: job.id,
+          jobId: jobId,
           level: "info",
           message: `${results[results.length - 1].action} Shopify product: ${shopifyProduct.title}`,
           stockNo: product.stockNo,
@@ -333,7 +371,7 @@ export async function pushSelectedProducts(
       await prisma.pushLog.create({
         data: {
           shop,
-          jobId: job.id,
+          jobId: jobId,
           level: "error",
           message: `Failed to push product: ${errorMessage}`,
           stockNo: product.stockNo,
@@ -351,7 +389,7 @@ export async function pushSelectedProducts(
 
     // Update job progress
     await prisma.pushJob.update({
-      where: { id: job.id },
+      where: { id: jobId },
       data: { pushedCount, failedCount },
     });
   }
@@ -361,7 +399,7 @@ export async function pushSelectedProducts(
     failedCount > 0 && pushedCount === 0 ? "FAILED" : "COMPLETED";
 
   await prisma.pushJob.update({
-    where: { id: job.id },
+    where: { id: jobId },
     data: {
       status: finalStatus,
       completedAt: new Date(),
@@ -371,7 +409,7 @@ export async function pushSelectedProducts(
   });
 
   return {
-    jobId: job.id,
+    jobId: jobId,
     results,
     pushedCount,
     failedCount,
