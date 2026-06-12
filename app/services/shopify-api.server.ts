@@ -79,37 +79,41 @@ export async function updateProduct(
   return r.product;
 }
 
-// ── Set product (can update base fields + variant pricing in one call) ──────
+// ── Variant pricing + SKU + inventory ────────────────────────────────────────
 
-export async function setProductWithPricing(
+export async function setVariantPricingAndInventory(
   admin: Admin,
   productId: string,
-  _productFields: Record<string, unknown>,
-  variantPrice: { price: string; compareAtPrice?: string | null },
+  variant: { price: string; compareAtPrice?: string | null; sku?: string },
+  inventory: { quantity: number | null; locationId: string | null },
 ): Promise<void> {
-  // First get the variant ID
+  // First get the variant + inventory item IDs
   const getQuery = `#graphql
-    query gv($id: ID!) { product(id: $id) { variants(first:1) { edges { node { id } } } } }
+    query gv($id: ID!) { product(id: $id) { variants(first:1) { edges { node { id inventoryItem { id } } } } } }
   `;
   const getRes = await admin.graphql(getQuery, { variables: { id: productId }, tries: TRIES });
   const getBody = (await getRes.json()) as {
-    data?: { product?: { variants?: { edges?: { node: { id: string } }[] } } };
+    data?: { product?: { variants?: { edges?: { node: { id: string; inventoryItem?: { id: string } } }[] } } };
   };
 
-  const variantId = getBody.data?.product?.variants?.edges?.[0]?.node?.id;
-  if (!variantId) {
+  const variantNode = getBody.data?.product?.variants?.edges?.[0]?.node;
+  if (!variantNode?.id) {
     console.warn("[push] No variant ID for pricing — skipping");
     return;
   }
 
-  // productVariantsBulkUpdate accepts: id, price, compareAtPrice
-  // Does NOT accept: sku, optionValues, inventoryQuantities
+  // productVariantsBulkUpdate accepts: id, price, compareAtPrice, inventoryItem
+  // SKU and tracking live on inventoryItem, NOT directly on the variant input.
   const variantInput: Record<string, unknown> = {
-    id: variantId,
-    price: variantPrice.price,
+    id: variantNode.id,
+    price: variant.price,
+    inventoryItem: {
+      tracked: true,
+      ...(variant.sku ? { sku: variant.sku } : {}),
+    },
   };
-  if (variantPrice.compareAtPrice) {
-    variantInput.compareAtPrice = variantPrice.compareAtPrice;
+  if (variant.compareAtPrice) {
+    variantInput.compareAtPrice = variant.compareAtPrice;
   }
 
   const query = `#graphql
@@ -133,6 +137,109 @@ export async function setProductWithPricing(
   if (body.errors) throw new Error(`productVariantsBulkUpdate errors: ${JSON.stringify(body.errors)}`);
   if (body.data?.productVariantsBulkUpdate?.userErrors?.length) {
     throw new Error(`productVariantsBulkUpdate userErrors: ${JSON.stringify(body.data.productVariantsBulkUpdate.userErrors)}`);
+  }
+
+  // Set the available quantity at the location
+  if (inventory.locationId && inventory.quantity !== null && variantNode.inventoryItem?.id) {
+    const qtyQuery = `#graphql
+      mutation setQty($input: InventorySetQuantitiesInput!) {
+        inventorySetQuantities(input: $input) {
+          userErrors { field message }
+        }
+      }
+    `;
+    const qtyRes = await admin.graphql(qtyQuery, {
+      variables: {
+        input: {
+          name: "available",
+          reason: "correction",
+          ignoreCompareQuantity: true,
+          quantities: [
+            {
+              inventoryItemId: variantNode.inventoryItem.id,
+              locationId: inventory.locationId,
+              quantity: inventory.quantity,
+            },
+          ],
+        },
+      },
+      tries: TRIES,
+    });
+    const qtyBody = (await qtyRes.json()) as {
+      data?: { inventorySetQuantities?: { userErrors?: UserError[] } };
+      errors?: unknown;
+    };
+    if (qtyBody.errors) throw new Error(`inventorySetQuantities errors: ${JSON.stringify(qtyBody.errors)}`);
+    if (qtyBody.data?.inventorySetQuantities?.userErrors?.length) {
+      throw new Error(`inventorySetQuantities userErrors: ${JSON.stringify(qtyBody.data.inventorySetQuantities.userErrors)}`);
+    }
+  }
+}
+
+// ── Publications & locations (fetched once per push job) ────────────────────
+
+export interface PushTargets {
+  publicationIds: string[];
+  locationId: string | null;
+}
+
+export async function getPushTargets(admin: Admin): Promise<PushTargets> {
+  const query = `#graphql
+    query getPubsAndLocation {
+      publications(first: 20) { edges { node { id } } }
+      locations(first: 10, includeInactive: false) { edges { node { id fulfillsOnlineOrders } } }
+    }
+  `;
+  const res = await admin.graphql(query, { tries: TRIES });
+  const body = (await res.json()) as {
+    data?: {
+      publications?: { edges?: { node: { id: string } }[] };
+      locations?: { edges?: { node: { id: string; fulfillsOnlineOrders: boolean } }[] };
+    };
+    errors?: unknown;
+  };
+  if (body.errors) throw new Error(`getPushTargets errors: ${JSON.stringify(body.errors)}`);
+
+  const publicationIds = (body.data?.publications?.edges ?? []).map((e) => e.node.id);
+  const locations = (body.data?.locations?.edges ?? []).map((e) => e.node);
+  const locationId =
+    locations.find((l) => l.fulfillsOnlineOrders)?.id ?? locations[0]?.id ?? null;
+
+  return { publicationIds, locationId };
+}
+
+/**
+ * Publish a product to the given sales channels. Best-effort: a publish
+ * failure is logged but must not fail the whole product push.
+ */
+export async function publishProduct(
+  admin: Admin,
+  productId: string,
+  publicationIds: string[],
+): Promise<void> {
+  if (publicationIds.length === 0) return;
+  const query = `#graphql
+    mutation publishProduct($id: ID!, $input: [PublicationInput!]!) {
+      publishablePublish(id: $id, input: $input) {
+        userErrors { field message }
+      }
+    }
+  `;
+  const res = await admin.graphql(query, {
+    variables: {
+      id: productId,
+      input: publicationIds.map((publicationId) => ({ publicationId })),
+    },
+    tries: TRIES,
+  });
+  const body = (await res.json()) as {
+    data?: { publishablePublish?: { userErrors?: UserError[] } };
+    errors?: unknown;
+  };
+  if (body.errors) {
+    console.error(`[push] Publish error: ${JSON.stringify(body.errors)}`);
+  } else if (body.data?.publishablePublish?.userErrors?.length) {
+    console.error(`[push] Publish userErrors: ${JSON.stringify(body.data.publishablePublish.userErrors)}`);
   }
 }
 

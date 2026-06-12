@@ -6,7 +6,7 @@ embedded = true
 name = "jewel-catalog"
 
 [access_scopes]
-scopes = "write_metaobject_definitions,write_metaobjects,write_products"
+scopes = "read_locations,write_inventory,write_metaobject_definitions,write_metaobjects,write_products,write_publications"
 
 [auth]
 redirect_urls = ["https://honest-heart-production-55ec.up.railway.app/auth/callback"]
@@ -23,5 +23,4 @@ api_version = "2026-07"
   topics = ["app/scopes_update"]
 
 [build]
-include_config_on_deploy = true
 automatically_update_urls_on_dev = true

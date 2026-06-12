@@ -10,10 +10,13 @@ import {
   createProduct,
   updateProduct,
   findProductBySupplierId,
-  setProductWithPricing,
+  setVariantPricingAndInventory,
   appendProductMedia,
   setProductMetafields,
+  getPushTargets,
+  publishProduct,
 } from "./shopify-api.server";
+import type { PushTargets } from "./shopify-api.server";
 import type { Admin } from "./shopify-api.server";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -136,9 +139,10 @@ export async function startPushJob(
     );
   }
 
-  // Find all selected products that haven't been pushed yet
+  // All selected products — already-pushed ones are included so re-pushing
+  // updates the existing Shopify product (dedup via ShopifyProductMapping).
   const products = await prisma.supplierProduct.findMany({
-    where: { shop, selected: true, pushed: false },
+    where: { shop, selected: true },
     orderBy: { stockNo: "asc" },
   });
 
@@ -207,6 +211,30 @@ async function runPushJob(
   const compareAtMultiplier = settings.compareAtMultiplier || 1.5;
   const compareAtFixed = settings.compareAtFixed || 0;
 
+  // Sales channels + inventory location, fetched once per job. If this fails
+  // (e.g. missing scopes before re-auth) products still push — they just
+  // aren't published/stocked — so log a warning instead of aborting.
+  const targets: PushTargets = {
+    publicationIds: [],
+    locationId: settings.defaultLocationId || null,
+  };
+  try {
+    const fetched = await getPushTargets(admin);
+    targets.publicationIds = fetched.publicationIds;
+    if (!targets.locationId) targets.locationId = fetched.locationId;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.warn(`[push] Could not fetch publications/locations: ${message}`);
+    await prisma.pushLog.create({
+      data: {
+        shop,
+        jobId,
+        level: "warn",
+        message: `Products will not be published to sales channels or stocked — could not fetch publications/locations (re-install the app if scopes changed): ${message}`,
+      },
+    });
+  }
+
   for (const product of products) {
     try {
       // Reconstruct the supplier item from the DB row
@@ -237,15 +265,6 @@ async function runPushJob(
           graphqlInput,
         );
 
-        // Update variant prices too
-        const vt = shopifyInput.variant;
-        if (vt) {
-          await setProductWithPricing(admin, shopifyProduct.id, {}, {
-            price: vt.price,
-            compareAtPrice: vt.compareAtPrice,
-          });
-        }
-
         // Update mapping title if changed
         await prisma.shopifyProductMapping.update({
           where: { id: existingMapping.id },
@@ -269,15 +288,6 @@ async function runPushJob(
         if (found) {
           // Product exists in Shopify but not in our mapping — update
           shopifyProduct = await updateProduct(admin, found.id, graphqlInput);
-
-          // Update variant prices
-          const vt2 = shopifyInput.variant;
-          if (vt2) {
-            await setProductWithPricing(admin, shopifyProduct.id, {}, {
-              price: vt2.price,
-              compareAtPrice: vt2.compareAtPrice,
-            });
-          }
 
           await prisma.shopifyProductMapping.create({
             data: {
@@ -316,15 +326,6 @@ async function runPushJob(
             }
           }
 
-          // Set variant price (separate step in 2026+ API)
-          const variantToSet = shopifyInput.variant;
-          if (variantToSet) {
-            await setProductWithPricing(admin, shopifyProduct.id, {}, {
-              price: variantToSet.price,
-              compareAtPrice: variantToSet.compareAtPrice,
-            });
-          }
-
           await prisma.shopifyProductMapping.create({
             data: {
               shop,
@@ -342,6 +343,23 @@ async function runPushJob(
           });
         }
       }
+
+      // Pricing, SKU, inventory tracking + quantity (created and updated alike)
+      const vt = shopifyInput.variant;
+      if (vt) {
+        await setVariantPricingAndInventory(
+          admin,
+          shopifyProduct.id,
+          { price: vt.price, compareAtPrice: vt.compareAtPrice, sku: vt.sku },
+          {
+            quantity: Number.parseInt(product.inhandPcs, 10) || 0,
+            locationId: targets.locationId,
+          },
+        );
+      }
+
+      // Publish to sales channels so the product shows on the storefront
+      await publishProduct(admin, shopifyProduct.id, targets.publicationIds);
 
       // Mark as pushed and unselect
       await prisma.supplierProduct.update({
