@@ -10,8 +10,16 @@
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface Admin {
-  graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response>;
+  graphql: (
+    query: string,
+    opts?: { variables?: Record<string, unknown>; tries?: number },
+  ) => Promise<Response>;
 }
+
+// Retry throttled/5xx responses (tries = 1 initial attempt + 2 retries).
+// Large pushes hit Shopify's cost-based rate limit constantly; the client
+// honors Retry-After so this self-paces the push loop.
+const TRIES = 3;
 
 interface UserError {
   field?: string[];
@@ -32,7 +40,7 @@ export async function createProduct(
       }
     }
   `;
-  const res = await admin.graphql(query, { variables: { product: input } });
+  const res = await admin.graphql(query, { variables: { product: input }, tries: TRIES });
   const body = (await res.json()) as { data?: { productCreate: { userErrors?: UserError[]; product?: { id: string; title: string } } }; errors?: unknown };
 
   if (body.errors) throw new Error(`productCreate errors: ${JSON.stringify(body.errors)}`);
@@ -60,7 +68,7 @@ export async function updateProduct(
     }
   `;
   const body_input = { ...input, id: productId };
-  const res = await admin.graphql(query, { variables: { product: body_input } });
+  const res = await admin.graphql(query, { variables: { product: body_input }, tries: TRIES });
   const body = (await res.json()) as { data?: { productUpdate: { userErrors?: UserError[]; product?: { id: string; title: string } } }; errors?: unknown };
 
   if (body.errors) throw new Error(`productUpdate errors: ${JSON.stringify(body.errors)}`);
@@ -83,7 +91,7 @@ export async function setProductWithPricing(
   const getQuery = `#graphql
     query gv($id: ID!) { product(id: $id) { variants(first:1) { edges { node { id } } } } }
   `;
-  const getRes = await admin.graphql(getQuery, { variables: { id: productId } });
+  const getRes = await admin.graphql(getQuery, { variables: { id: productId }, tries: TRIES });
   const getBody = (await getRes.json()) as {
     data?: { product?: { variants?: { edges?: { node: { id: string } }[] } } };
   };
@@ -115,6 +123,7 @@ export async function setProductWithPricing(
 
   const res = await admin.graphql(query, {
     variables: { productId, variants: [variantInput] },
+    tries: TRIES,
   });
   const body = (await res.json()) as {
     data?: { productVariantsBulkUpdate?: { userErrors?: UserError[] } };
@@ -142,7 +151,7 @@ export async function appendProductMedia(
       }
     }
   `;
-  const res = await admin.graphql(query, { variables: { productId, media } });
+  const res = await admin.graphql(query, { variables: { productId, media }, tries: TRIES });
   const body = (await res.json()) as { data?: { productUpdateMedia?: { userErrors?: UserError[] } }; errors?: unknown };
   if (body.errors) console.error(`[push] Media error: ${JSON.stringify(body.errors)}`);
   else if (body.data?.productUpdateMedia?.userErrors?.length) {
@@ -166,7 +175,7 @@ export async function setProductMetafields(
       }
     }
   `;
-  const res = await admin.graphql(query, { variables: { metafields: inputs } });
+  const res = await admin.graphql(query, { variables: { metafields: inputs }, tries: TRIES });
   const body = (await res.json()) as { data?: { metafieldsSet?: { userErrors?: UserError[] } }; errors?: unknown };
   if (body.errors) console.error(`[push] Metafield error: ${JSON.stringify(body.errors)}`);
   else if (body.data?.metafieldsSet?.userErrors?.length) {
