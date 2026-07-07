@@ -93,12 +93,15 @@ model SupplierProduct {
 // ── Shopify product mapping (dedup) ──
 
 model ShopifyProductMapping {
-  id               Int      @id @default(autoincrement())
-  shop             String
-  supplierStockNo  String   @unique
-  shopifyProductId String
+  id                  Int      @id @default(autoincrement())
+  shop                String
+  supplierStockNo     String
+  shopifyProductId    String
   shopifyProductTitle String?
-  pushedAt         DateTime @default(now())
+  pushedAt            DateTime @default(now())
+
+  @@unique([shop, supplierStockNo])
+  @@index([shop])
 }
 
 // ── Push job tracking ──
