@@ -153,7 +153,6 @@ export async function setVariantPricingAndInventory(
         input: {
           name: "available",
           reason: "correction",
-          ignoreCompareQuantity: true,
           quantities: [
             {
               inventoryItemId: variantNode.inventoryItem.id,

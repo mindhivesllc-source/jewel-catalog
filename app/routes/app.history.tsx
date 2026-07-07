@@ -1,17 +1,16 @@
 import { useEffect } from "react";
-import type {
-  HeadersFunction,
-} from "react-router";
+import type { HeadersFunction } from "react-router";
 import { useFetcher } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 interface PushJob {
-  id: string;
+  id: number;
   status: string;
   totalSelected: number;
-  pushed: number;
-  failed: number;
-  startedAt: string;
+  pushedCount: number;
+  failedCount: number;
+  errorMessage?: string | null;
+  startedAt: string | null;
   completedAt: string | null;
 }
 
@@ -25,6 +24,10 @@ const STATUS_MAP: Record<string, { label: string; tone: string }> = {
   RUNNING: { label: "Running", tone: "caution" },
   PENDING: { label: "Pending", tone: "info" },
 };
+
+function formatDate(value: string | null) {
+  return value ? new Date(value).toLocaleString() : "—";
+}
 
 export default function HistoryPage() {
   const fetcher = useFetcher();
@@ -80,7 +83,7 @@ export default function HistoryPage() {
               <s-text type="strong">Status</s-text>
             </s-table-cell>
             <s-table-cell>
-              <s-text type="strong">Total Selected</s-text>
+              <s-text type="strong">Total</s-text>
             </s-table-cell>
             <s-table-cell>
               <s-text type="strong">Pushed</s-text>
@@ -89,38 +92,36 @@ export default function HistoryPage() {
               <s-text type="strong">Failed</s-text>
             </s-table-cell>
             <s-table-cell>
+              <s-text type="strong">Error</s-text>
+            </s-table-cell>
+            <s-table-cell>
               <s-text type="strong">Started</s-text>
             </s-table-cell>
             <s-table-cell>
               <s-text type="strong">Completed</s-text>
             </s-table-cell>
           </s-table-header-row>
+
           {jobs.map((job) => {
             const statusMeta = STATUS_MAP[job.status] || {
               label: job.status,
               tone: "info",
             };
+
             return (
               <s-table-row key={job.id}>
                 <s-table-cell>
                   <s-text fontVariantNumeric="tabular-nums">{job.id}</s-text>
                 </s-table-cell>
                 <s-table-cell>
-                  <s-badge tone={statusMeta.tone}>
-                    {statusMeta.label}
-                  </s-badge>
+                  <s-badge tone={statusMeta.tone}>{statusMeta.label}</s-badge>
                 </s-table-cell>
                 <s-table-cell>{job.totalSelected}</s-table-cell>
-                <s-table-cell>{job.pushed}</s-table-cell>
-                <s-table-cell>{job.failed}</s-table-cell>
-                <s-table-cell>
-                  {new Date(job.startedAt).toLocaleString()}
-                </s-table-cell>
-                <s-table-cell>
-                  {job.completedAt
-                    ? new Date(job.completedAt).toLocaleString()
-                    : "\u2014"}
-                </s-table-cell>
+                <s-table-cell>{job.pushedCount}</s-table-cell>
+                <s-table-cell>{job.failedCount}</s-table-cell>
+                <s-table-cell>{job.errorMessage || "—"}</s-table-cell>
+                <s-table-cell>{formatDate(job.startedAt)}</s-table-cell>
+                <s-table-cell>{formatDate(job.completedAt)}</s-table-cell>
               </s-table-row>
             );
           })}
