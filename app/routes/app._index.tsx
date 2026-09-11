@@ -69,6 +69,24 @@ const SORT_OPTIONS = [
 
 const PAGE_SIZE = 24;
 
+interface PreviewRow {
+  stockNo: string;
+  title: string;
+  price: string;
+  compareAtPrice?: string;
+  quantity: number;
+  imageCount: number;
+  hasVideo: boolean;
+  action: "create" | "update";
+  warnings: ("zero_price" | "no_images" | "zero_stock")[];
+}
+
+const WARNING_LABELS: Record<PreviewRow["warnings"][number], string> = {
+  zero_price: "$0 price",
+  no_images: "No images",
+  zero_stock: "Stock 0",
+};
+
 /* ── Helpers ───────────────────────────────────────────────── */
 
 function fmtPrice(n: number): string {
@@ -221,6 +239,7 @@ export default function CatalogPage() {
   const pushFetcher = useFetcher();
   const pushStatusFetcher = useFetcher();
   const fetchFetcher = useFetcher();
+  const previewFetcher = useFetcher();
 
   /* ── State ──────────────────────────────────────────────── */
   const [view, setView] = useState<string>(() => {
@@ -253,6 +272,10 @@ export default function CatalogPage() {
 
   /* Did we ever fetch? */
   const [hasFetched, setHasFetched] = useState(false);
+
+  /* Push preview panel (dry run shown before /api/push/start) */
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewRows, setPreviewRows] = useState<PreviewRow[]>([]);
 
   /* Background push job being polled (null = no push running) */
   const [activePushJobId, setActivePushJobId] = useState<number | null>(null);
@@ -498,6 +521,23 @@ export default function CatalogPage() {
     }
   }, [fetchFetcher.data, fetchFetcher.state]);
 
+  /* Adopt preview rows when the dry run returns */
+  useEffect(() => {
+    if (previewFetcher.state !== "idle" || !previewFetcher.data) return;
+    const result = previewFetcher.data as {
+      success?: boolean;
+      rows?: PreviewRow[];
+      error?: string;
+    };
+    if (result.error) {
+      shopify.toast.show(result.error, { isError: true });
+      setPreviewOpen(false);
+    } else if (result.success && result.rows) {
+      setPreviewRows(result.rows);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewFetcher.data, previewFetcher.state]);
+
   /* Mark hasFetched */
   useEffect(() => {
     if (rawData && !hasFetched) setHasFetched(true);
@@ -567,14 +607,42 @@ export default function CatalogPage() {
     );
   };
 
+  /* Push button: dry run first, real push only from the preview panel */
   const handlePush = () => {
     if (selections.size === 0) {
       shopify.toast.show("No products selected", { isError: true });
       return;
     }
+    setPreviewRows([]);
+    setPreviewOpen(true);
+    previewFetcher.load("/api/push/preview");
+  };
+
+  const handleConfirmPush = () => {
+    setPreviewOpen(false);
     pushFetcher.submit(null, {
       method: "POST",
       action: "/api/push/start",
+    });
+  };
+
+  const handleCancelPreview = () => {
+    setPreviewOpen(false);
+    setPreviewRows([]);
+  };
+
+  /** Drop one row from the upcoming push (deselects it server-side too) */
+  const handleRemoveFromPreview = (stockNo: string) => {
+    setPreviewRows((rows) => rows.filter((r) => r.stockNo !== stockNo));
+    setSelections((prev) => {
+      const next = new Set(prev);
+      next.delete(stockNo);
+      return next;
+    });
+    selectFetcher.submit(JSON.stringify({ stockNo, selected: false }), {
+      method: "POST",
+      action: "/api/catalog/select",
+      encType: "application/json",
     });
   };
 
@@ -1060,6 +1128,118 @@ export default function CatalogPage() {
     </div>
   );
 
+  /* ── Push preview panel ─────────────────────────────────── */
+
+  const renderPreview = () => {
+    const loading = previewFetcher.state !== "idle";
+    const warningRows = previewRows.filter((r) => r.warnings.length > 0).length;
+    const creates = previewRows.filter((r) => r.action === "create").length;
+    const updates = previewRows.length - creates;
+
+    return (
+      <s-section heading="Push preview">
+        <s-stack direction="block" gap="base">
+          {loading && (
+            <s-stack direction="inline" gap="base">
+              <s-spinner size="base" />
+              <s-text color="subdued">Building preview…</s-text>
+            </s-stack>
+          )}
+
+          {!loading && previewRows.length === 0 && (
+            <s-text color="subdued">Nothing selected to push.</s-text>
+          )}
+
+          {!loading && previewRows.length > 0 && (
+            <>
+              <s-text>
+                <s-text type="strong">{previewRows.length}</s-text> products will be sent to
+                Shopify: {creates} new, {updates} updated.
+                {warningRows > 0 && (
+                  <>
+                    {" "}
+                    <s-text tone="critical" type="strong">
+                      {warningRows} with warnings
+                    </s-text>{" "}
+                    — review or remove them below.
+                  </>
+                )}
+              </s-text>
+
+              <div style={{ overflowX: "auto" }}>
+                <s-table>
+                  <s-table-header-row slot="head">
+                    <s-table-cell><s-text type="strong">Action</s-text></s-table-cell>
+                    <s-table-cell><s-text type="strong">SKU</s-text></s-table-cell>
+                    <s-table-cell><s-text type="strong">Title</s-text></s-table-cell>
+                    <s-table-cell><s-text type="strong">Price</s-text></s-table-cell>
+                    <s-table-cell><s-text type="strong">Stock</s-text></s-table-cell>
+                    <s-table-cell><s-text type="strong">Media</s-text></s-table-cell>
+                    <s-table-cell><s-text type="strong">Warnings</s-text></s-table-cell>
+                    <s-table-cell><s-text type="strong"></s-text></s-table-cell>
+                  </s-table-header-row>
+                  {previewRows.map((r) => (
+                    <s-table-row key={r.stockNo}>
+                      <s-table-cell>
+                        <s-badge tone={r.action === "create" ? "success" : "info"}>
+                          {r.action === "create" ? "Create" : "Update"}
+                        </s-badge>
+                      </s-table-cell>
+                      <s-table-cell><s-text>{r.stockNo}</s-text></s-table-cell>
+                      <s-table-cell><s-text>{r.title}</s-text></s-table-cell>
+                      <s-table-cell>
+                        <s-text>
+                          ${r.price}
+                          {r.compareAtPrice ? ` (was $${r.compareAtPrice})` : ""}
+                        </s-text>
+                      </s-table-cell>
+                      <s-table-cell><s-text>{r.quantity}</s-text></s-table-cell>
+                      <s-table-cell>
+                        <s-text>
+                          {r.imageCount} img{r.hasVideo ? " + video" : ""}
+                        </s-text>
+                      </s-table-cell>
+                      <s-table-cell>
+                        {r.warnings.length === 0 ? (
+                          <s-text color="subdued">—</s-text>
+                        ) : (
+                          <s-stack direction="inline" gap="small-200">
+                            {r.warnings.map((w) => (
+                              <s-badge key={w} tone="critical">{WARNING_LABELS[w]}</s-badge>
+                            ))}
+                          </s-stack>
+                        )}
+                      </s-table-cell>
+                      <s-table-cell>
+                        <s-button
+                          variant="tertiary"
+                          onClick={() => handleRemoveFromPreview(r.stockNo)}
+                        >
+                          Remove
+                        </s-button>
+                      </s-table-cell>
+                    </s-table-row>
+                  ))}
+                </s-table>
+              </div>
+            </>
+          )}
+
+          <s-stack direction="inline" gap="base">
+            <s-button onClick={handleCancelPreview}>Cancel</s-button>
+            <s-button
+              variant="primary"
+              onClick={handleConfirmPush}
+              {...(loading || previewRows.length === 0 ? { disabled: true } : {})}
+            >
+              Push {previewRows.length} products ▶
+            </s-button>
+          </s-stack>
+        </s-stack>
+      </s-section>
+    );
+  };
+
   /* ── Main render ────────────────────────────────────────── */
 
   return (
@@ -1089,8 +1269,11 @@ export default function CatalogPage() {
         </s-banner>
       )}
 
+      {/* Push preview replaces the product area until confirmed/cancelled */}
+      {previewOpen && renderPreview()}
+
       {/* Product display area */}
-      {productsLoading && (
+      {!previewOpen && productsLoading && (
         <s-section>
           <s-stack direction="block" gap="base">
             <s-spinner size="large" />
@@ -1099,7 +1282,7 @@ export default function CatalogPage() {
         </s-section>
       )}
 
-      {!productsLoading && !hasFetched && (
+      {!previewOpen && !productsLoading && !hasFetched && (
         <s-section>
           <s-stack direction="block" gap="base">
             <s-text type="strong">Welcome to Jewel Catalog</s-text>
@@ -1126,7 +1309,7 @@ export default function CatalogPage() {
         </s-section>
       )}
 
-      {!productsLoading && hasFetched && products.length === 0 && (
+      {!previewOpen && !productsLoading && hasFetched && products.length === 0 && (
         <s-section>
           <s-stack direction="block" gap="base">
             <s-text type="strong">No products match your filters</s-text>
@@ -1137,13 +1320,13 @@ export default function CatalogPage() {
         </s-section>
       )}
 
-      {!productsLoading && products.length > 0 && view === "grid" && (
+      {!previewOpen && !productsLoading && products.length > 0 && view === "grid" && (
         <div style={STYLES.productGrid}>
           {products.map(renderProductCard)}
         </div>
       )}
 
-      {!productsLoading && products.length > 0 && view === "list" && (
+      {!previewOpen && !productsLoading && products.length > 0 && view === "list" && (
         renderListView()
       )}
 
