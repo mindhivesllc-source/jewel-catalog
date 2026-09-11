@@ -128,6 +128,30 @@ export function supplierItemToDbRow(
 
 type CompareAtRule = "none" | "multiply" | "fixed";
 
+// ── Sell-price markup (per category, "*" default) ───────────────────────────
+
+export interface PricingRule {
+  markupType: "percent" | "fixed";
+  markupValue: number;
+  roundTo: "none" | "0.99" | "whole";
+}
+
+/**
+ * Supplier price → sell price. Applied BEFORE compare-at rules so a
+ * "multiply" compare-at is a multiple of what the customer actually pays.
+ */
+export function applyMarkup(price: number, rule?: PricingRule | null): number {
+  if (!rule) return price;
+  let out =
+    rule.markupType === "fixed"
+      ? price + rule.markupValue
+      : price * (1 + rule.markupValue / 100);
+  if (out < 0) out = 0;
+  if (rule.roundTo === "whole") out = Math.ceil(out);
+  else if (rule.roundTo === "0.99") out = Math.max(0, Math.ceil(out) - 0.01);
+  return Math.round(out * 100) / 100;
+}
+
 function computeCompareAt(
   price: number,
   rule: CompareAtRule,
@@ -184,6 +208,7 @@ export function buildShopifyProductInput(
   compareAtRule: CompareAtRule = "none",
   compareAtMultiplier = 1.5,
   compareAtFixed = 0,
+  pricing?: PricingRule | null,
 ): ShopifyProductInput {
   const category = mapCategory(item.Category);
   const jewelryType = mapJewelryType(item.Jewelry_Type);
@@ -191,7 +216,8 @@ export function buildShopifyProductInput(
   const shape = (item.Shape ?? "").trim();
   const growthType = (item.Growth_Type ?? "").trim();
   const stockNo = item.Stock_No;
-  const price = parseFloat(item.Price) || 0;
+  const supplierPrice = parseFloat(item.Price) || 0;
+  const price = applyMarkup(supplierPrice, pricing);
 
   // Shopify-compatible title
   const title = `${metalType} ${shape} ${jewelryType} ${category} — ${stockNo}`;

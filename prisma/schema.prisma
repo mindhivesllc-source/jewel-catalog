@@ -132,3 +132,17 @@ model PushLog {
 
   @@index([jobId])
 }
+
+// ── Per-category sell-price markup (category "*" = default) ──
+
+model CategoryPricingRule {
+  id          Int      @id @default(autoincrement())
+  shop        String
+  category    String
+  markupType  String   @default("percent")
+  markupValue Float    @default(0)
+  roundTo     String   @default("none")
+  updatedAt   DateTime @updatedAt
+
+  @@unique([shop, category])
+}

@@ -7,6 +7,7 @@ import prisma from "../db.server";
 import {
   buildProductCreateOrUpdateInput,
   dbRowToSupplierItem,
+  loadPricingRules,
 } from "./push.server";
 
 export type PreviewWarning = "zero_price" | "no_images" | "zero_stock";
@@ -60,7 +61,7 @@ export async function buildPushPreview(shop: string): Promise<PreviewRow[]> {
   const settings = await prisma.shopSettings.findUnique({ where: { shop } });
   if (!settings) return [];
 
-  const [products, mappings] = await Promise.all([
+  const [products, mappings, rules] = await Promise.all([
     prisma.supplierProduct.findMany({
       where: { shop, selected: true },
       orderBy: { stockNo: "asc" },
@@ -69,12 +70,13 @@ export async function buildPushPreview(shop: string): Promise<PreviewRow[]> {
       where: { shop },
       select: { supplierStockNo: true },
     }),
+    loadPricingRules(shop),
   ]);
   const mapped = new Set(mappings.map((m) => m.supplierStockNo));
 
   return products.map((row) => {
     const item = dbRowToSupplierItem(row as unknown as Record<string, unknown>);
-    const built = buildProductCreateOrUpdateInput(item, settings);
+    const built = buildProductCreateOrUpdateInput(item, settings, rules);
     return previewRow(built, row.stockNo, mapped.has(row.stockNo));
   });
 }

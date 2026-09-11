@@ -15,7 +15,8 @@ import { randomUUID } from "node:crypto";
 import prisma from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import type { SupplierItem } from "./supplier.server";
-import { buildShopifyProductInput } from "./mapper.server";
+import { buildShopifyProductInput, mapCategory } from "./mapper.server";
+import type { PricingRule } from "./mapper.server";
 
 /* ── Types ─────────────────────────────────────────────────────────────────── */
 
@@ -323,9 +324,34 @@ function normalizeMedia(
   return media.slice(0, 10);
 }
 
+/** Per-category markup rules for a shop, keyed by mapped category ("*" = default). */
+export async function loadPricingRules(
+  shop: string,
+): Promise<Map<string, PricingRule>> {
+  const rows = await prisma.categoryPricingRule.findMany({ where: { shop } });
+  const map = new Map<string, PricingRule>();
+  for (const r of rows) {
+    map.set(r.category, {
+      markupType: r.markupType === "fixed" ? "fixed" : "percent",
+      markupValue: r.markupValue,
+      roundTo: r.roundTo === "0.99" || r.roundTo === "whole" ? r.roundTo : "none",
+    });
+  }
+  return map;
+}
+
+export function pricingRuleFor(
+  rules: Map<string, PricingRule> | undefined,
+  rawCategory: string,
+): PricingRule | null {
+  if (!rules) return null;
+  return rules.get(mapCategory(rawCategory)) ?? rules.get("*") ?? null;
+}
+
 export function buildProductCreateOrUpdateInput(
   supplierItem: SupplierItem,
   settings: ShopSettingsRow,
+  rules?: Map<string, PricingRule>,
   productId?: string,
 ): {
   product: Record<string, unknown>;
@@ -355,6 +381,7 @@ export function buildProductCreateOrUpdateInput(
     compareAtRule,
     compareAtMultiplier,
     compareAtFixed,
+    pricingRuleFor(rules, supplierItem.Category),
   ) as any;
 
   const title =
@@ -1022,6 +1049,8 @@ async function runPushJob(
     }
   }
 
+  const pricingRules = await loadPricingRules(shop);
+
   let publicationIds: string[] = [];
   try {
     publicationIds = await getPublicationIds(admin);
@@ -1043,7 +1072,7 @@ async function runPushJob(
         product as unknown as Record<string, unknown>,
       );
 
-      const built = buildProductCreateOrUpdateInput(supplierItem, settings);
+      const built = buildProductCreateOrUpdateInput(supplierItem, settings, pricingRules);
       const sku = built.variant.sku || product.stockNo;
 
       if (built.variant.price === "0.00") {
