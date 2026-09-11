@@ -204,7 +204,7 @@ async function warnLog(
 
 /* ── Supplier row conversion ───────────────────────────────────────────────── */
 
-function dbRowToSupplierItem(row: Record<string, unknown>): SupplierItem {
+export function dbRowToSupplierItem(row: Record<string, unknown>): SupplierItem {
   return {
     Stock_No: String(row.stockNo ?? ""),
     Subitem: String(row.subitem ?? ""),
@@ -323,7 +323,7 @@ function normalizeMedia(
   return media.slice(0, 10);
 }
 
-function buildProductCreateOrUpdateInput(
+export function buildProductCreateOrUpdateInput(
   supplierItem: SupplierItem,
   settings: ShopSettingsRow,
   productId?: string,
