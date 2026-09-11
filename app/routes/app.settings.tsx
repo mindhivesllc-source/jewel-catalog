@@ -181,6 +181,9 @@ export default function SettingsPage() {
     compareAtFixed?: number;
     defaultLocationId?: string;
     titleTemplate?: string;
+    autoSyncEnabled?: boolean;
+    lastSyncAt?: string | null;
+    lastSyncMessage?: string | null;
     lastFetchTimestamp?: string;
     error?: string;
   } | null;
@@ -227,6 +230,7 @@ export default function SettingsPage() {
     <s-page heading="Settings">
       <s-section heading="Supplier Connection">
         <fetcher.Form method="post" action="/api/settings">
+          <input type="hidden" name="settingsForm" value="1" />
           <s-stack direction="block" gap="base">
             <s-password-field
               label="API Key"
@@ -283,6 +287,30 @@ export default function SettingsPage() {
                   step="0.01"
                   min="0"
                 />
+              )}
+            </s-stack>
+          </s-section>
+
+          <s-section heading="Auto-sync">
+            <s-stack direction="block" gap="base">
+              <s-checkbox
+                label="Keep Shopify in sync automatically"
+                name="autoSyncEnabled"
+                value="true"
+                {...(data?.autoSyncEnabled ? { checked: true } : {})}
+                details="Every 15 minutes: re-fetch the supplier catalog, re-push products whose price, stock or details changed, and set stock to 0 for products the supplier delisted. A manual Fetch or Test connection within the last 15 minutes delays the next run (supplier rate limit)."
+              />
+              {data?.lastSyncAt && (
+                <s-text color="subdued">
+                  Last sync: {new Date(data.lastSyncAt).toLocaleString()}
+                  {data.lastSyncMessage ? ` — ${data.lastSyncMessage}` : ""}
+                </s-text>
+              )}
+              {data?.autoSyncEnabled && data?.lastFetchTimestamp && (
+                <s-text color="subdued">
+                  Next sync no earlier than:{" "}
+                  {new Date(new Date(data.lastFetchTimestamp).getTime() + 15 * 60 * 1000).toLocaleString()}
+                </s-text>
               )}
             </s-stack>
           </s-section>

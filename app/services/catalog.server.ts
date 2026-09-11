@@ -40,7 +40,7 @@ export async function fetchAndStoreCatalog(
   shop: string,
   apiKey: string,
   signal?: AbortSignal,
-): Promise<{ total: number; warning?: string }> {
+): Promise<{ total: number; warning?: string; stockNos: string[] }> {
   const { items, warning } = await fetchAllSupplierProducts(apiKey, signal);
 
   let upserted = 0;
@@ -72,7 +72,7 @@ export async function fetchAndStoreCatalog(
     update: { lastFetchAt: new Date() },
   });
 
-  return { total: upserted, warning };
+  return { total: upserted, warning, stockNos: items.map((i) => i.Stock_No) };
 }
 
 // ── Counts ───────────────────────────────────────────────────────────────────

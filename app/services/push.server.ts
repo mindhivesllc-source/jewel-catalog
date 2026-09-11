@@ -1137,6 +1137,7 @@ export async function failStaleJobs(shop: string): Promise<void> {
 export async function startPushJob(
   shop: string,
   admin: Admin,
+  trigger: "manual" | "auto" = "manual",
 ): Promise<PushStart> {
   const settings = await prisma.shopSettings.findUnique({
     where: { shop },
@@ -1173,6 +1174,7 @@ export async function startPushJob(
     data: {
       shop,
       status: "RUNNING",
+      trigger,
       totalSelected: products.length,
       startedAt: new Date(),
       pushedCount: 0,
@@ -1469,6 +1471,7 @@ async function runPushJob(
         data: {
           pushed: true,
           selected: false,
+          lastPushedHash: product.syncHash,
         },
       });
 

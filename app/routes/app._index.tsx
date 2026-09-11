@@ -23,6 +23,7 @@ interface Product {
   price: number;
   selected: boolean;
   pushed: boolean;
+  delistedAt?: string | null;
 }
 
 interface CountsData {
@@ -1002,6 +1003,9 @@ export default function CatalogPage() {
             </label>
           </div>
           <div style={{ position: "absolute", top: "8px", right: "8px", display: "flex", gap: "4px" }}>
+            {product.delistedAt && (
+              <s-badge tone="critical">DELISTED</s-badge>
+            )}
             {product.pushed && (
               <s-badge tone="success">PUSHED</s-badge>
             )}
@@ -1092,7 +1096,9 @@ export default function CatalogPage() {
               <s-text tone="success" type="strong">${fmtPrice(product.price)}</s-text>
             </s-table-cell>
             <s-table-cell>
-              {product.pushed ? (
+              {product.delistedAt ? (
+                <s-badge tone="critical">DELISTED</s-badge>
+              ) : product.pushed ? (
                 <s-badge tone="success">PUSHED</s-badge>
               ) : product.selected ? (
                 <s-badge tone="caution">SELECTED</s-badge>

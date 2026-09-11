@@ -10,6 +10,7 @@ interface PushJob {
   pushedCount: number;
   failedCount: number;
   errorMessage?: string | null;
+  trigger?: string;
   startedAt: string | null;
   completedAt: string | null;
 }
@@ -83,6 +84,9 @@ export default function HistoryPage() {
               <s-text type="strong">Status</s-text>
             </s-table-cell>
             <s-table-cell>
+              <s-text type="strong">Trigger</s-text>
+            </s-table-cell>
+            <s-table-cell>
               <s-text type="strong">Total</s-text>
             </s-table-cell>
             <s-table-cell>
@@ -115,6 +119,11 @@ export default function HistoryPage() {
                 </s-table-cell>
                 <s-table-cell>
                   <s-badge tone={statusMeta.tone}>{statusMeta.label}</s-badge>
+                </s-table-cell>
+                <s-table-cell>
+                  <s-badge tone={job.trigger === "auto" ? "info" : "neutral"}>
+                    {job.trigger === "auto" ? "Auto-sync" : "Manual"}
+                  </s-badge>
                 </s-table-cell>
                 <s-table-cell>{job.totalSelected}</s-table-cell>
                 <s-table-cell>{job.pushedCount}</s-table-cell>

@@ -28,6 +28,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       compareAtFixed: settings.compareAtFixed,
       defaultLocationId: settings.defaultLocationId,
       titleTemplate: settings.titleTemplate,
+      autoSyncEnabled: settings.autoSyncEnabled,
+      lastSyncAt: settings.lastSyncAt,
+      lastSyncMessage: settings.lastSyncMessage,
       lastFetchTimestamp: settings.lastFetchAt,
     });
   } catch (err: any) {
@@ -91,6 +94,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     updateData.defaultLocationId = body.defaultLocationId;
   }
 
+  if ("autoSyncEnabled" in body) {
+    const v = body.autoSyncEnabled;
+    updateData.autoSyncEnabled = v === true || v === "true" || v === "on" || v === "1";
+  } else if (request.headers.get("content-type")?.includes("form") && "settingsForm" in body) {
+    // Unchecked checkboxes are absent from form posts; the form marks itself.
+    updateData.autoSyncEnabled = false;
+  }
+
   if ("titleTemplate" in body) {
     const t = String(body.titleTemplate ?? "").trim();
     if (t) updateData.titleTemplate = t;
@@ -111,6 +122,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       compareAtFixed: settings.compareAtFixed,
       defaultLocationId: settings.defaultLocationId,
       titleTemplate: settings.titleTemplate,
+      autoSyncEnabled: settings.autoSyncEnabled,
+      lastSyncAt: settings.lastSyncAt,
+      lastSyncMessage: settings.lastSyncMessage,
       lastFetchTimestamp: settings.lastFetchAt,
     });
   } catch (err: any) {

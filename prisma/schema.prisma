@@ -46,6 +46,11 @@ model ShopSettings {
   // Storefront quality (feature 3)
   titleTemplate     String   @default("{diaWt}ct {shape} Lab Grown Diamond {jewelryType} {category} in {metal}")
   metafieldDefinitionsAt DateTime?
+  // Auto-sync (feature 4)
+  autoSyncEnabled   Boolean  @default(false)
+  syncLockedUntil   DateTime?
+  lastSyncAt        DateTime?
+  lastSyncMessage   String?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
@@ -81,6 +86,10 @@ model SupplierProduct {
   selected      Boolean  @default(false)
   pushed        Boolean  @default(false)
   fetchedAt     DateTime @default(now())
+  // syncHash at the time of the last successful push; differs => needs re-push
+  lastPushedHash String?
+  // set when the supplier feed stopped listing this item (stock forced to 0)
+  delistedAt    DateTime?
 
   @@unique([shop, stockNo])
   @@index([shop, category])
@@ -119,6 +128,7 @@ model PushJob {
   startedAt       DateTime?
   completedAt     DateTime?
   errorMessage    String?
+  trigger         String   @default("manual")
   createdAt       DateTime @default(now())
 
   @@index([shop, status])

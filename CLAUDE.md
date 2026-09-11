@@ -24,6 +24,16 @@ selects products and pushes them to Shopify as Products.
   endpoint). The admin client is re-acquired via `unauthenticated.admin(shop)`
   every 10 min because offline tokens expire after 60 min.
 - `app/services/mapper.server.ts` — supplier item → DB row / Shopify input.
+  Title from `ShopSettings.titleTemplate` (`renderTitle`), per-category
+  markup (`applyMarkup`, table CategoryPricingRule), Video_1 → VIDEO media.
+- `app/services/preview.server.ts` — dry run for `/api/push/preview`
+  (Catalog page shows it before every push).
+- `app/services/sync.server.ts` + `app/scheduler.server.ts` — auto-sync
+  every 15 min per shop with `autoSyncEnabled` (skips ticks inside the
+  supplier's 15-min window; delisted items get stock 0; PushJob.trigger =
+  "auto"). `DISABLE_AUTO_SYNC=1` turns the scheduler off.
+- Unit tests: `npm test` (vitest, `app/services/*.test.ts` only —
+  `app/routes/api.supplier.test.tsx` is a ROUTE, not a test).
 - `prisma/schema.prisma` — Postgres. Key models: Session, ShopSettings,
   SupplierProduct, ShopifyProductMapping (dedup), PushJob, PushLog.
 
@@ -36,6 +46,10 @@ selects products and pushes them to Shopify as Products.
    status ACTIVE/metafields (2026-07 `product:` argument, NOT `input:`).
 3. Media: `productUpdate(product:{id}, media:[CreateMediaInput])` on create,
    and on update when the product has `mediaCount == 0`. Best-effort → warn.
+   Job start also runs `ensureStorefrontSetup`: `custom.*` metafield
+   definitions (adminFilterable + smartCollectionCondition) once per shop and
+   one smart collection per category via the legacy-but-valid
+   `collectionCreate(input:{ruleSet})`.
 4. `productVariantsBulkUpdate`: price, compareAtPrice, and
    `inventoryItem: { tracked: true, sku }`. **SKU lives on inventoryItem, NOT
    on the variant input** (past bug, commit b5d22ca).
