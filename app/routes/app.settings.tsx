@@ -180,6 +180,7 @@ export default function SettingsPage() {
     compareAtMultiplier?: number;
     compareAtFixed?: number;
     defaultLocationId?: string;
+    titleTemplate?: string;
     lastFetchTimestamp?: string;
     error?: string;
   } | null;
@@ -283,6 +284,17 @@ export default function SettingsPage() {
                   min="0"
                 />
               )}
+            </s-stack>
+          </s-section>
+
+          <s-section heading="Storefront">
+            <s-stack direction="block" gap="base">
+              <s-text-field
+                label="Product title template"
+                name="titleTemplate"
+                value={data?.titleTemplate || "{diaWt}ct {shape} Lab Grown Diamond {jewelryType} {category} in {metal}"}
+                details="Tokens: {diaWt} {shape} {jewelryType} {category} {metal} {color} {clarity} {growthType} {size} {stockNo}. Empty tokens are dropped. Applied on the next push."
+              />
             </s-stack>
           </s-section>
 

@@ -27,6 +27,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       compareAtMultiplier: settings.compareAtMultiplier,
       compareAtFixed: settings.compareAtFixed,
       defaultLocationId: settings.defaultLocationId,
+      titleTemplate: settings.titleTemplate,
       lastFetchTimestamp: settings.lastFetchAt,
     });
   } catch (err: any) {
@@ -90,6 +91,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     updateData.defaultLocationId = body.defaultLocationId;
   }
 
+  if ("titleTemplate" in body) {
+    const t = String(body.titleTemplate ?? "").trim();
+    if (t) updateData.titleTemplate = t;
+  }
+
   try {
     const settings = await prisma.shopSettings.upsert({
       where: { shop },
@@ -104,6 +110,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       compareAtMultiplier: settings.compareAtMultiplier,
       compareAtFixed: settings.compareAtFixed,
       defaultLocationId: settings.defaultLocationId,
+      titleTemplate: settings.titleTemplate,
       lastFetchTimestamp: settings.lastFetchAt,
     });
   } catch (err: any) {

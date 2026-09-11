@@ -15,7 +15,11 @@ import { randomUUID } from "node:crypto";
 import prisma from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import type { SupplierItem } from "./supplier.server";
-import { buildShopifyProductInput, mapCategory } from "./mapper.server";
+import {
+  buildShopifyProductInput,
+  mapCategory,
+  DEFAULT_TITLE_TEMPLATE,
+} from "./mapper.server";
 import type { PricingRule } from "./mapper.server";
 
 /* ── Types ─────────────────────────────────────────────────────────────────── */
@@ -274,7 +278,10 @@ function normalizeMetafields(
   add("custom", "metal_type", supplierItem.Metal_Type);
   add("custom", "shape", supplierItem.Shape);
   add("custom", "clarity", supplierItem.Clarity);
-  add("custom", "diamond_weight", supplierItem.Dia_Wt);
+  const diaWt = toStringValue(supplierItem.Dia_Wt);
+  if (/^\d+(\.\d+)?$/.test(diaWt)) {
+    add("custom", "diamond_weight", diaWt, "number_decimal");
+  }
 
   return [...byKey.values()];
 }
@@ -283,12 +290,12 @@ function normalizeMedia(
   rawMedia: unknown,
 ): Array<{
   originalSource: string;
-  mediaContentType: "IMAGE" | "EXTERNAL_VIDEO";
+  mediaContentType: "IMAGE" | "VIDEO" | "EXTERNAL_VIDEO";
   alt?: string;
 }> {
   const media: Array<{
     originalSource: string;
-    mediaContentType: "IMAGE" | "EXTERNAL_VIDEO";
+    mediaContentType: "IMAGE" | "VIDEO" | "EXTERNAL_VIDEO";
     alt?: string;
   }> = [];
 
@@ -301,10 +308,9 @@ function normalizeMedia(
 
     seen.add(originalSource);
 
+    const upper = toStringValue(type).toUpperCase();
     const mediaContentType =
-      toStringValue(type).toUpperCase() === "EXTERNAL_VIDEO"
-        ? "EXTERNAL_VIDEO"
-        : "IMAGE";
+      upper === "EXTERNAL_VIDEO" ? "EXTERNAL_VIDEO" : upper === "VIDEO" ? "VIDEO" : "IMAGE";
 
     media.push(
       cleanObject({
@@ -357,7 +363,7 @@ export function buildProductCreateOrUpdateInput(
   product: Record<string, unknown>;
   media: Array<{
     originalSource: string;
-    mediaContentType: "IMAGE" | "EXTERNAL_VIDEO";
+    mediaContentType: "IMAGE" | "VIDEO" | "EXTERNAL_VIDEO";
     alt?: string;
   }>;
   variant: {
@@ -382,6 +388,7 @@ export function buildProductCreateOrUpdateInput(
     compareAtMultiplier,
     compareAtFixed,
     pricingRuleFor(rules, supplierItem.Category),
+    settings.titleTemplate || DEFAULT_TITLE_TEMPLATE,
   ) as any;
 
   const title =
@@ -666,7 +673,7 @@ async function appendMediaToProduct(
   productId: string,
   media: Array<{
     originalSource: string;
-    mediaContentType: "IMAGE" | "EXTERNAL_VIDEO";
+    mediaContentType: "IMAGE" | "VIDEO" | "EXTERNAL_VIDEO";
     alt?: string;
   }>,
 ): Promise<void> {
@@ -894,6 +901,201 @@ async function publishProduct(
   assertNoUserErrors("publishablePublish", data.publishablePublish.userErrors);
 }
 
+/* ── Storefront setup: metafield definitions + smart collections ──────────── */
+
+// Definitions for the metafields written by normalizeMetafields. Filterable in
+// admin and usable in smart-collection rules. Created once per shop.
+const PRODUCT_METAFIELD_DEFINITIONS = [
+  { key: "metal_type", name: "Metal", type: "single_line_text_field" },
+  { key: "shape", name: "Diamond shape", type: "single_line_text_field" },
+  { key: "clarity", name: "Clarity", type: "single_line_text_field" },
+  { key: "jewelry_type", name: "Jewelry style", type: "single_line_text_field" },
+  { key: "diamond_weight", name: "Diamond weight (ct)", type: "number_decimal" },
+] as const;
+
+async function ensureMetafieldDefinitions(
+  admin: Admin,
+  shop: string,
+  jobId: number,
+): Promise<void> {
+  const existing = await shopifyGraphql<{
+    metafieldDefinitions: { nodes: Array<{ key: string; type: { name: string } }> };
+  }>(
+    admin,
+    "metafieldDefinitions",
+    `#graphql
+      query ExistingDefs($namespace: String!) {
+        metafieldDefinitions(first: 50, ownerType: PRODUCT, namespace: $namespace) {
+          nodes { key type { name } }
+        }
+      }
+    `,
+    { namespace: "custom" },
+  );
+  const have = new Set(existing.metafieldDefinitions.nodes.map((n) => n.key));
+
+  for (const def of PRODUCT_METAFIELD_DEFINITIONS) {
+    if (have.has(def.key)) continue;
+    const data = await shopifyGraphql<{
+      metafieldDefinitionCreate: {
+        createdDefinition: { id: string } | null;
+        userErrors: Array<GqlUserError & { code?: string }>;
+      };
+    }>(
+      admin,
+      "metafieldDefinitionCreate",
+      `#graphql
+        mutation CreateDef($definition: MetafieldDefinitionInput!) {
+          metafieldDefinitionCreate(definition: $definition) {
+            createdDefinition { id }
+            userErrors { field message code }
+          }
+        }
+      `,
+      {
+        definition: {
+          name: def.name,
+          namespace: "custom",
+          key: def.key,
+          type: def.type,
+          ownerType: "PRODUCT",
+          capabilities: {
+            adminFilterable: { enabled: true },
+            smartCollectionCondition: { enabled: true },
+          },
+        },
+      },
+    );
+    const errs = data.metafieldDefinitionCreate.userErrors;
+    if (errs.length && !errs.some((e) => e.code === "TAKEN")) {
+      await warnLog(
+        shop,
+        jobId,
+        null,
+        `Metafield definition custom.${def.key} not created: ${userErrorText(errs)}`,
+      );
+    }
+  }
+}
+
+async function ensureCategoryCollections(
+  admin: Admin,
+  shop: string,
+  jobId: number,
+  categories: string[],
+  publicationIds: string[],
+): Promise<void> {
+  const cached = await prisma.shopCollection.findMany({ where: { shop } });
+  const have = new Set(cached.map((c) => c.category));
+
+  for (const category of categories) {
+    if (!category || category === "Other" || have.has(category)) continue;
+
+    // Reuse a collection with this title if the merchant already made one.
+    const found = await shopifyGraphql<{
+      collections: { nodes: Array<{ id: string; title: string }> };
+    }>(
+      admin,
+      "findCollection",
+      `#graphql
+        query FindCollection($query: String!) {
+          collections(first: 1, query: $query) { nodes { id title } }
+        }
+      `,
+      { query: `title:"${category.replace(/"/g, '\\"')}"` },
+    );
+    let collectionId = found.collections.nodes.find((c) => c.title === category)?.id;
+
+    if (!collectionId) {
+      const created = await shopifyGraphql<{
+        collectionCreate: {
+          collection: { id: string } | null;
+          userErrors: GqlUserError[];
+        };
+      }>(
+        admin,
+        "collectionCreate",
+        `#graphql
+          mutation CreateSmartCollection($input: CollectionInput!) {
+            collectionCreate(input: $input) {
+              collection { id title }
+              userErrors { field message }
+            }
+          }
+        `,
+        // `input`/`ruleSet` is marked deprecated in 2026-07 in favour of
+        // `collection.sources`, but it validates and works; the sources API
+        // shape is not documented well enough to ship blind.
+        {
+          input: {
+            title: category,
+            ruleSet: {
+              appliedDisjunctively: false,
+              rules: [{ column: "TYPE", relation: "EQUALS", condition: category }],
+            },
+          },
+        },
+      );
+      if (created.collectionCreate.userErrors.length || !created.collectionCreate.collection) {
+        await warnLog(
+          shop,
+          jobId,
+          null,
+          `Collection "${category}" not created: ${userErrorText(created.collectionCreate.userErrors) || "no collection returned"}`,
+        );
+        continue;
+      }
+      collectionId = created.collectionCreate.collection.id;
+      if (publicationIds.length > 0) {
+        try {
+          await publishProduct(admin, collectionId, publicationIds);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Unknown error";
+          await warnLog(shop, jobId, null, `Collection "${category}" created but not published: ${message}`);
+        }
+      }
+    }
+
+    await prisma.shopCollection.upsert({
+      where: { shop_category: { shop, category } },
+      create: { shop, category, shopifyCollectionId: collectionId },
+      update: { shopifyCollectionId: collectionId },
+    });
+  }
+}
+
+/**
+ * One-time-per-shop storefront setup, run at the start of every push job.
+ * Idempotent and best-effort: failures become warn rows, never abort the push.
+ */
+async function ensureStorefrontSetup(
+  admin: Admin,
+  shop: string,
+  jobId: number,
+  settings: ShopSettingsRow,
+  categories: string[],
+  publicationIds: string[],
+): Promise<void> {
+  if (!settings.metafieldDefinitionsAt) {
+    try {
+      await ensureMetafieldDefinitions(admin, shop, jobId);
+      await prisma.shopSettings.update({
+        where: { shop },
+        data: { metafieldDefinitionsAt: new Date() },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      await warnLog(shop, jobId, null, `Metafield definitions setup failed (will retry next push): ${message}`);
+    }
+  }
+  try {
+    await ensureCategoryCollections(admin, shop, jobId, categories, publicationIds);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    await warnLog(shop, jobId, null, `Collection setup failed (will retry next push): ${message}`);
+  }
+}
+
 /* ── Stale job detection ──────────────────────────────────────────────────── */
 
 /**
@@ -1063,6 +1265,15 @@ async function runPushJob(
       `Could not fetch publications. Product publishing will be skipped. Add read_publications scope and re-install the app. ${message}`,
     );
   }
+
+  await ensureStorefrontSetup(
+    admin,
+    shop,
+    jobId,
+    settings,
+    [...new Set(products.map((p) => p.category))],
+    publicationIds,
+  );
 
   for (const product of products) {
     try {

@@ -43,6 +43,9 @@ model ShopSettings {
   compareAtMultiplier Float  @default(1.5)
   compareAtFixed    Float    @default(0)
   defaultLocationId String   @default("")
+  // Storefront quality (feature 3)
+  titleTemplate     String   @default("{diaWt}ct {shape} Lab Grown Diamond {jewelryType} {category} in {metal}")
+  metafieldDefinitionsAt DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
@@ -143,6 +146,18 @@ model CategoryPricingRule {
   markupValue Float    @default(0)
   roundTo     String   @default("none")
   updatedAt   DateTime @updatedAt
+
+  @@unique([shop, category])
+}
+
+// ── Smart collections created by the app, one per category ──
+
+model ShopCollection {
+  id                  Int      @id @default(autoincrement())
+  shop                String
+  category            String
+  shopifyCollectionId String
+  createdAt           DateTime @default(now())
 
   @@unique([shop, category])
 }

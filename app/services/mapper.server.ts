@@ -190,7 +190,7 @@ interface ShopifyVariantInput {
 }
 
 interface ShopifyMediaInput {
-  mediaContentType: "IMAGE";
+  mediaContentType: "IMAGE" | "VIDEO";
   originalSource: string;
   alt?: string;
 }
@@ -202,6 +202,44 @@ interface ShopifyMetafieldInput {
   type: string;
 }
 
+// ── Title template ──────────────────────────────────────────────────────────
+
+export const DEFAULT_TITLE_TEMPLATE =
+  "{diaWt}ct {shape} Lab Grown Diamond {jewelryType} {category} in {metal}";
+
+/**
+ * Resolve `{token}` placeholders. Unknown/empty tokens vanish; a "ct" glued to
+ * an empty {diaWt} vanishes too; whitespace collapses. Falls back to the
+ * stock number so a title is never empty.
+ */
+export function renderTitle(
+  template: string,
+  item: SupplierItem,
+  mapped: { category: string; jewelryType: string },
+): string {
+  const tokens: Record<string, string> = {
+    diaWt: (item.Dia_Wt ?? "").trim(),
+    shape: (item.Shape ?? "").trim(),
+    jewelryType: mapped.jewelryType === "Other" ? "" : mapped.jewelryType,
+    category: mapped.category === "Other" ? "" : mapped.category,
+    metal: (item.Metal_Type ?? "").trim(),
+    color: (item.Color ?? "").trim(),
+    clarity: (item.Clarity ?? "").trim(),
+    growthType: (item.Growth_Type ?? "").trim(),
+    size: (item.Size ?? "").trim(),
+    stockNo: item.Stock_No ?? "",
+  };
+  let out = (template || DEFAULT_TITLE_TEMPLATE).replace(
+    /\{(\w+)\}(ct)?/g,
+    (_m, key: string, suffix?: string) => {
+      const v = tokens[key] ?? "";
+      return v ? v + (suffix ?? "") : "";
+    },
+  );
+  out = out.replace(/\s+/g, " ").trim().replace(/\s+in$/i, "");
+  return out || `Jewelry ${item.Stock_No}`;
+}
+
 export function buildShopifyProductInput(
   item: SupplierItem,
   vendor: string,
@@ -209,6 +247,7 @@ export function buildShopifyProductInput(
   compareAtMultiplier = 1.5,
   compareAtFixed = 0,
   pricing?: PricingRule | null,
+  titleTemplate: string = DEFAULT_TITLE_TEMPLATE,
 ): ShopifyProductInput {
   const category = mapCategory(item.Category);
   const jewelryType = mapJewelryType(item.Jewelry_Type);
@@ -219,8 +258,8 @@ export function buildShopifyProductInput(
   const supplierPrice = parseFloat(item.Price) || 0;
   const price = applyMarkup(supplierPrice, pricing);
 
-  // Shopify-compatible title
-  const title = `${metalType} ${shape} ${jewelryType} ${category} — ${stockNo}`;
+  // Storefront title from the merchant's template (stock number lives on SKU)
+  const title = renderTitle(titleTemplate, item, { category, jewelryType });
 
   // Description HTML
   const bodyLines = [
@@ -267,6 +306,11 @@ export function buildShopifyProductInput(
   }
   if (item.Image_2) {
     media.push({ mediaContentType: "IMAGE", originalSource: item.Image_2 });
+  }
+  // Supplier hosts direct mp4 files; Shopify accepts an external URL as the
+  // originalSource of a VIDEO and transcodes it asynchronously.
+  if (item.Video_1 && /^https?:\/\//i.test(item.Video_1.trim())) {
+    media.push({ mediaContentType: "VIDEO", originalSource: item.Video_1.trim(), alt: title });
   }
 
   // Metafields
