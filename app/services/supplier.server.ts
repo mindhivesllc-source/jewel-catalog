@@ -122,36 +122,63 @@ export async function fetchSupplierPage(
  * Fetch every page from the supplier API, returning all items in one flat array.
  * Respects the AbortSignal so callers can cancel mid-fetch.
  */
+export interface SupplierFetchResult {
+  items: SupplierItem[];
+  totalPages: number;
+  fetchedPages: number;
+  /** Set when a later page failed (e.g. rate limit) and the result is partial. */
+  warning?: string;
+}
+
 export async function fetchAllSupplierProducts(
   apiKey: string,
   signal?: AbortSignal,
-): Promise<SupplierItem[]> {
+): Promise<SupplierFetchResult> {
   const allItems: SupplierItem[] = [];
   let page = 1;
   let totalPages = 1;
+  let fetchedPages = 0;
+  let warning: string | undefined;
 
   do {
-    const pageResp = await fetchSupplierPage(apiKey, page, signal);
-    allItems.push(...pageResp.Stock);
-
-    totalPages = pageResp.total_page;
-    page++;
+    try {
+      const pageResp = await fetchSupplierPage(apiKey, page, signal);
+      allItems.push(...pageResp.Stock);
+      totalPages = pageResp.total_page;
+      fetchedPages++;
+      page++;
+    } catch (err) {
+      // Page 1 failing means nothing usable — propagate. A later page failing
+      // (the supplier allows 1 request / 15 min) must not throw away the
+      // pages already downloaded: store them and tell the merchant.
+      if (page === 1) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      warning = `Fetched ${fetchedPages} of ${totalPages} supplier pages; page ${page} failed (${message}). Fetch again in 15 minutes to complete the catalog.`;
+      break;
+    }
   } while (page <= totalPages);
 
-  return allItems;
+  return { items: allItems, totalPages, fetchedPages, warning };
 }
 
 /**
  * Quick connectivity / credential check.
- * Returns `true` when the API key works and the first page is parseable.
+ * Returns ok:true when the API key works and the first page has products;
+ * otherwise ok:false with a human-readable reason (never throws).
+ * NOTE: this consumes the supplier's 1-request-per-15-minute window.
  */
 export async function testSupplierConnection(
   apiKey: string,
-): Promise<boolean> {
+): Promise<{ ok: boolean; items?: number; error?: string }> {
   try {
     const pageResp = await fetchSupplierPage(apiKey, 1);
-    return Array.isArray(pageResp.Stock) && pageResp.Stock.length > 0;
-  } catch {
-    return false;
+    const items = Array.isArray(pageResp.Stock) ? pageResp.Stock.length : 0;
+    if (items === 0) {
+      return { ok: false, items, error: "Supplier API responded but returned no products — check the API key." };
+    }
+    return { ok: true, items };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Supplier connection failed: ${message}` };
   }
 }

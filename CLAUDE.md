@@ -15,43 +15,60 @@ selects products and pushes them to Shopify as Products.
 - `app/services/catalog.server.ts` — DB queries/upserts for SupplierProduct.
 - `app/services/push.server.ts` — `startPushJob` creates a PushJob row and
   returns immediately; `runPushJob` loops detached from the HTTP request.
-  Concurrent pushes per shop are blocked; RUNNING jobs >30min are auto-failed.
-- `app/services/shopify-api.server.ts` — all Shopify Admin GraphQL calls.
-  Every call passes `tries: 3` (retries throttled requests, honors Retry-After).
+  It also contains ALL Shopify Admin GraphQL calls (helpers `createProduct`,
+  `updateProduct`, `updateVariantPricingAndSku`, `setInventoryQuantity`,
+  `publishProduct`, ...). Every call goes through `shopifyGraphql()` which
+  passes `tries: 3` (retries throttled requests, honors Retry-After).
+  Concurrent pushes per shop are blocked. A RUNNING job with no PushLog line
+  for 10 min is auto-failed (`failStaleJobs`, also called by the status
+  endpoint). The admin client is re-acquired via `unauthenticated.admin(shop)`
+  every 10 min because offline tokens expire after 60 min.
 - `app/services/mapper.server.ts` — supplier item → DB row / Shopify input.
 - `prisma/schema.prisma` — Postgres. Key models: Session, ShopSettings,
   SupplierProduct, ShopifyProductMapping (dedup), PushJob, PushLog.
 
 ## What a push does (per product)
 
-1. Dedup: ShopifyProductMapping by stockNo → else metafield lookup → else create.
-2. `productCreate`/`productUpdate` (title/description/vendor/type/tags ONLY —
-   the 2025-10 input takes no variants/media/metafields).
-3. Media + metafields (create path; best-effort, logged not thrown).
+1. Dedup: ShopifyProductMapping by (shop, stockNo) → else variant SKU lookup
+   → else create. If the mapped product was deleted in Shopify admin, the
+   mapping is dropped and the product is recreated.
+2. `productCreate`/`productUpdate` with title/description/vendor/type/tags/
+   status ACTIVE/metafields (2026-07 `product:` argument, NOT `input:`).
+3. Media: `productUpdate(product:{id}, media:[CreateMediaInput])` on create,
+   and on update when the product has `mediaCount == 0`. Best-effort → warn.
 4. `productVariantsBulkUpdate`: price, compareAtPrice, and
    `inventoryItem: { tracked: true, sku }`. **SKU lives on inventoryItem, NOT
    on the variant input** (past bug, commit b5d22ca).
-5. `inventorySetQuantities` (name "available", `ignoreCompareQuantity: true`)
-   with quantity = supplier `Inhand_Pcs` at the shop's fulfillment location.
+5. `inventorySetQuantities` (name "available", `ignoreCompareQuantity: true`,
+   `@idempotent(key:)` directive — required since 2026-04) with quantity =
+   supplier `Inhand_Pcs`. **Without `ignoreCompareQuantity: true` Shopify
+   returns COMPARE_QUANTITY_REQUIRED for every item and stock silently stays
+   0** (bug shipped in commit 4a3f132, fixed after).
 6. `publishablePublish` to all publications — **without this, products never
    appear on the storefront** even when Active (past bug).
 7. Mark row pushed+deselected, write PushLog, bump PushJob counters.
+   Inventory/publish/media failures are `warn` PushLog rows, not failures —
+   check History / `/api/debug/push-errors` after a push.
 
 Re-pushing an already-pushed product is allowed and updates it in place.
 
 ## Shopify API rules
 
-- API version: 2025-10 (`ApiVersion.October25` in `app/shopify.server.ts`).
+- API version: 2026-07 (`ApiVersion.July26` in `app/shopify.server.ts`;
+  webhooks `api_version = "2026-07"` in `shopify.app.toml`). Shopify supports
+  a version for 12 months — bump both every quarter.
 - Scopes (must match in THREE places: `shopify.app.toml`, Railway `SCOPES`
   var, and the released app config on Shopify):
-  `read_locations,write_inventory,write_metaobject_definitions,write_metaobjects,write_products,write_publications`
+  `read_inventory,read_locations,read_products,read_publications,write_inventory,write_metaobject_definitions,write_metaobjects,write_products,write_publications`
 - Changing scopes/config: edit `shopify.app.toml`, then
   `npx shopify app deploy --allow-updates --no-build -m "why"`, then the
   merchant must re-open the app in admin to accept.
 - ALWAYS validate new/changed GraphQL with the shopify-dev-mcp
-  `validate_graphql_codeblocks` tool (api: admin, version: 2025-10).
-- `findProductBySupplierId` must never throw — it is a best-effort fallback;
-  query syntax is `metafields.lgd_supplier.supplier_id:<value>`.
+  `validate_graphql_codeblocks` tool (api: admin, version: 2026-07).
+- `findProductBySku` must never throw — it is a best-effort fallback
+  (`productVariants(query: "sku:\"<stockNo>\"")`).
+- Offline access tokens expire (`expiringOfflineAccessTokens: true`, 60 min).
+  Any long-running loop must re-acquire `admin` via `unauthenticated.admin`.
 
 ## Build, run, deploy
 
@@ -75,7 +92,13 @@ Re-pushing an already-pushed product is allowed and updates it in place.
 
 ## Gotchas that have already burned time
 
-- Supplier API: 1 request/15min. A failed fetch wastes the window.
+- Supplier API: 1 request/15min. A failed fetch wastes the window. "Test
+  connection" in Settings ALSO consumes the window. Multi-page catalogs are
+  stored partially and the fetch returns a `warning` string.
+- API routes must return `{ success: true, ... }` — the UI toasts key off
+  `result.success` / `result.error` (past silent bug: fetch/test never toasted).
+- `diaWt` is a string column; numeric range filtering goes through
+  `applyDiaWtRange` (raw Postgres cast) so counts/select-all/export agree.
 - Railway service variables must include `DATABASE_URL = ${{Postgres.DATABASE_URL}}`.
 - Do not add a `RAILWAY_RUN_CMD` variable or volumes to the app service.
 - Postgres `contains` is case-sensitive — catalog search uses

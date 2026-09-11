@@ -4,13 +4,16 @@
  * This version avoids the common 2026-07 Shopify GraphQL failures:
  * - productCreate/productUpdate use the new `product:` argument, not deprecated `input:`
  * - product variants are updated through productVariantsBulkUpdate
- * - inventorySetQuantities uses `changeFromQuantity: null` and @idempotent
+ * - inventorySetQuantities uses `ignoreCompareQuantity: true` and @idempotent
+ * - every Admin call retries throttled responses (tries: 3); the admin client is
+ *   re-acquired every 10 min so expiring offline tokens never die mid-job
  * - media, inventory and publication failures are logged as warnings instead of making
  *   the whole product fail after it has already been created.
  */
 
 import { randomUUID } from "node:crypto";
 import prisma from "../db.server";
+import { unauthenticated } from "../shopify.server";
 import type { SupplierItem } from "./supplier.server";
 import { buildShopifyProductInput } from "./mapper.server";
 
@@ -19,7 +22,7 @@ import { buildShopifyProductInput } from "./mapper.server";
 export type Admin = {
   graphql: (
     query: string,
-    options?: { variables?: Record<string, unknown> },
+    options?: { variables?: Record<string, unknown>; tries?: number },
   ) => Promise<Response>;
 };
 
@@ -56,6 +59,7 @@ type ShopifyProductResult = {
   title: string;
   variantId?: string;
   inventoryItemId?: string;
+  mediaCount?: number;
 };
 
 type GqlUserError = {
@@ -65,8 +69,19 @@ type GqlUserError = {
 
 /* ── Constants ──────────────────────────────────────────────────────────────── */
 
-const STALE_JOB_MS = 30 * 60 * 1000;
+// A RUNNING job whose last progress write (PushLog) is older than this was
+// interrupted (server restart / crash). Measured from the last log line, not
+// from startedAt, so a long but healthy push is never marked failed.
+const STALE_JOB_MS = 10 * 60 * 1000;
 const APP_NAME_FOR_INVENTORY_URI = "jewel-catalog";
+// Retry throttled / 5xx Shopify responses. The client honors Retry-After, so
+// this self-paces the loop under the cost-based rate limit.
+const GRAPHQL_TRIES = 3;
+// Offline access tokens expire after 60 minutes (expiringOfflineAccessTokens).
+// The admin client captured at request time is NOT refreshed mid-job, so we
+// re-acquire it from session storage periodically; the library refreshes the
+// token when it is within 5 minutes of expiry.
+const ADMIN_REFRESH_EVERY_MS = 10 * 60 * 1000;
 
 /* ── Generic helpers ───────────────────────────────────────────────────────── */
 
@@ -138,13 +153,21 @@ function assertNoUserErrors(
   }
 }
 
+function isProductMissingError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /does not exist|not found|could not find/i.test(message);
+}
+
 async function shopifyGraphql<T>(
   admin: Admin,
   operation: string,
   query: string,
   variables: Record<string, unknown> = {},
 ): Promise<T> {
-  const response = await admin.graphql(query, { variables });
+  const response = await admin.graphql(query, {
+    variables,
+    tries: GRAPHQL_TRIES,
+  });
   const json = await response.json();
 
   if (json.errors?.length) {
@@ -449,6 +472,7 @@ async function updateProduct(
       product: null | {
         id: string;
         title: string;
+        mediaCount?: { count: number } | null;
         variants: {
           nodes: Array<{
             id: string;
@@ -467,6 +491,7 @@ async function updateProduct(
           product {
             id
             title
+            mediaCount { count }
             variants(first: 1) {
               nodes {
                 id
@@ -498,6 +523,7 @@ async function updateProduct(
     title: updated.title,
     variantId: variant?.id,
     inventoryItemId: variant?.inventoryItem?.id,
+    mediaCount: updated.mediaCount?.count,
   };
 }
 
@@ -779,14 +805,17 @@ async function setInventoryQuantity(
         name: "available",
         reason: "correction",
         referenceDocumentUri: `gid://${APP_NAME_FOR_INVENTORY_URI}/PushJob/${params.jobId}-${params.stockNo}`,
-      quantities: [
-  {
-    inventoryItemId: params.inventoryItemId,
-    locationId: params.locationId,
-    quantity: params.quantity,
-    changeFromQuantity: null,
-  },
-],
+        // The supplier feed is the source of truth for stock, so skip the
+        // compare-and-set check. Without this Shopify rejects every entry
+        // with COMPARE_QUANTITY_REQUIRED and stock silently stays at 0.
+        ignoreCompareQuantity: true,
+        quantities: [
+          {
+            inventoryItemId: params.inventoryItemId,
+            locationId: params.locationId,
+            quantity: params.quantity,
+          },
+        ],
       },
       idempotencyKey,
     },
@@ -838,6 +867,42 @@ async function publishProduct(
   assertNoUserErrors("publishablePublish", data.publishablePublish.userErrors);
 }
 
+/* ── Stale job detection ──────────────────────────────────────────────────── */
+
+/**
+ * Mark RUNNING jobs as FAILED when they have shown no progress for
+ * STALE_JOB_MS. Progress = the newest PushLog line for the job (every product
+ * writes one), falling back to startedAt for a job that never logged.
+ * Exported so the status endpoint can clear a dead job without a new push.
+ */
+export async function failStaleJobs(shop: string): Promise<void> {
+  const running = await prisma.pushJob.findMany({
+    where: { shop, status: "RUNNING" },
+  });
+  const cutoff = Date.now() - STALE_JOB_MS;
+
+  for (const job of running) {
+    const lastLog = await prisma.pushLog.findFirst({
+      where: { jobId: job.id },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    });
+    const lastActivity = lastLog?.createdAt ?? job.startedAt ?? job.createdAt;
+    if (lastActivity.getTime() >= cutoff) continue;
+
+    await prisma.pushJob.update({
+      where: { id: job.id },
+      data: {
+        status: "FAILED",
+        completedAt: new Date(),
+        errorMessage:
+          job.errorMessage ||
+          "Interrupted: no progress for 10 minutes (server restarted during push). Selected products were kept; push again to resume.",
+      },
+    });
+  }
+}
+
 /* ── Public push entrypoint ────────────────────────────────────────────────── */
 
 export async function startPushJob(
@@ -854,18 +919,7 @@ export async function startPushJob(
     );
   }
 
-  await prisma.pushJob.updateMany({
-    where: {
-      shop,
-      status: "RUNNING",
-      startedAt: { lt: new Date(Date.now() - STALE_JOB_MS) },
-    },
-    data: {
-      status: "FAILED",
-      completedAt: new Date(),
-      errorMessage: "Interrupted: server restarted during push.",
-    },
-  });
+  await failStaleJobs(shop);
 
   const running = await prisma.pushJob.findFirst({
     where: { shop, status: "RUNNING" },
@@ -923,7 +977,7 @@ export async function startPushJob(
 
 async function runPushJob(
   shop: string,
-  admin: Admin,
+  initialAdmin: Admin,
   jobId: number,
   products: SupplierProductRow[],
   settings: ShopSettingsRow,
@@ -932,6 +986,26 @@ async function runPushJob(
   let pushedCount = 0;
   let failedCount = 0;
   let firstFailure: string | null = null;
+
+  let admin: Admin = initialAdmin;
+  let adminAcquiredAt = Date.now();
+  const refreshAdminIfNeeded = async () => {
+    if (Date.now() - adminAcquiredAt < ADMIN_REFRESH_EVERY_MS) return;
+    try {
+      const ctx = await unauthenticated.admin(shop);
+      admin = ctx.admin as unknown as Admin;
+      adminAcquiredAt = Date.now();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      await warnLog(
+        shop,
+        jobId,
+        null,
+        `Could not refresh Shopify access token; continuing with current token. ${message}`,
+      );
+      adminAcquiredAt = Date.now();
+    }
+  };
 
   let locationId = settings.defaultLocationId || null;
   if (!locationId) {
@@ -963,6 +1037,8 @@ async function runPushJob(
 
   for (const product of products) {
     try {
+      await refreshAdminIfNeeded();
+
       const supplierItem = dbRowToSupplierItem(
         product as unknown as Record<string, unknown>,
       );
@@ -970,11 +1046,20 @@ async function runPushJob(
       const built = buildProductCreateOrUpdateInput(supplierItem, settings);
       const sku = built.variant.sku || product.stockNo;
 
-      const existingMapping = await prisma.shopifyProductMapping.findFirst({
+      if (built.variant.price === "0.00") {
+        await warnLog(
+          shop,
+          jobId,
+          product.stockNo,
+          `Supplier price is 0 — product will be listed at $0.00. Check the supplier feed for this item.`,
+        );
+      }
+
+      let existingMapping = await prisma.shopifyProductMapping.findFirst({
         where: { shop, supplierStockNo: product.stockNo },
       });
 
-      let shopifyProduct: ShopifyProductResult;
+      let shopifyProduct: ShopifyProductResult | null = null;
       let action: "created" | "updated" = "created";
 
       if (existingMapping) {
@@ -983,7 +1068,27 @@ async function runPushJob(
           id: existingMapping.shopifyProductId,
         };
 
-        shopifyProduct = await updateProduct(admin, updateInput);
+        try {
+          shopifyProduct = await updateProduct(admin, updateInput);
+        } catch (err) {
+          // The merchant deleted the product in Shopify admin. Drop the stale
+          // mapping and fall through to the create path instead of failing
+          // this product on every future push.
+          if (!isProductMissingError(err)) throw err;
+          await warnLog(
+            shop,
+            jobId,
+            product.stockNo,
+            `Mapped Shopify product ${existingMapping.shopifyProductId} no longer exists — recreating it.`,
+          );
+          await prisma.shopifyProductMapping.delete({
+            where: { id: existingMapping.id },
+          });
+          existingMapping = null;
+        }
+      }
+
+      if (existingMapping && shopifyProduct) {
         action = "updated";
 
         await prisma.shopifyProductMapping.update({
@@ -994,6 +1099,20 @@ async function runPushJob(
             pushedAt: new Date(),
           },
         });
+
+        if (shopifyProduct.mediaCount === 0 && built.media.length > 0) {
+          try {
+            await appendMediaToProduct(admin, shopifyProduct.id, built.media);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "Unknown error";
+            await warnLog(
+              shop,
+              jobId,
+              product.stockNo,
+              `Product updated, but media upload failed: ${message}`,
+            );
+          }
+        }
       } else {
         const foundBySku = await findProductBySku(admin, sku);
 
@@ -1039,6 +1158,10 @@ async function runPushJob(
             );
           }
         }
+      }
+
+      if (!shopifyProduct) {
+        throw new Error("Shopify product was neither created nor updated.");
       }
 
       let variantId = shopifyProduct.variantId;

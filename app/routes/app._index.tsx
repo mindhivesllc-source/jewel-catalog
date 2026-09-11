@@ -478,9 +478,18 @@ export default function CatalogPage() {
   /* Refresh products after fetch triggers */
   useEffect(() => {
     if (fetchFetcher.data && fetchFetcher.state === "idle") {
-      const result = fetchFetcher.data as { success?: boolean; error?: string };
+      const result = fetchFetcher.data as {
+        success?: boolean;
+        total?: number;
+        warning?: string;
+        error?: string;
+      };
       if (result.success) {
-        shopify.toast.show("Fetch completed");
+        if (result.warning) {
+          shopify.toast.show(result.warning, { isError: true, duration: 8000 });
+        } else {
+          shopify.toast.show(`Fetch completed: ${result.total ?? 0} products`);
+        }
         countsFetcher.load("/api/catalog/counts");
         productsFetcher.load(buildProductsUrl());
       } else if (result.error) {

@@ -18,7 +18,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   try {
     const result = await fetchAndStoreCatalog(shop, settings.supplierApiKey);
-    return data(result);
+    return data({ success: true, ...result });
   } catch (err: any) {
     return data(
       { error: err.message || "Failed to fetch catalog" },
@@ -42,7 +42,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   try {
     const result = await fetchAndStoreCatalog(shop, settings.supplierApiKey);
-    return data(result);
+    return data({ success: true, ...result });
   } catch (err: any) {
     return data(
       { error: err.message || "Failed to fetch catalog" },

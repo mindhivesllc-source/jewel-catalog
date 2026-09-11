@@ -26,6 +26,7 @@ export interface CatalogFilters {
   pushed?: boolean;
   page?: number;
   limit?: number;
+  sort?: "newest" | "price_asc" | "price_desc" | "sku";
 }
 
 // ── Fetch & Store ────────────────────────────────────────────────────────────
@@ -39,8 +40,8 @@ export async function fetchAndStoreCatalog(
   shop: string,
   apiKey: string,
   signal?: AbortSignal,
-): Promise<{ total: number }> {
-  const items = await fetchAllSupplierProducts(apiKey, signal);
+): Promise<{ total: number; warning?: string }> {
+  const { items, warning } = await fetchAllSupplierProducts(apiKey, signal);
 
   let upserted = 0;
 
@@ -71,7 +72,7 @@ export async function fetchAndStoreCatalog(
     update: { lastFetchAt: new Date() },
   });
 
-  return { total: upserted };
+  return { total: upserted, warning };
 }
 
 // ── Counts ───────────────────────────────────────────────────────────────────
@@ -190,15 +191,8 @@ function buildWhere(
 
   // Numeric range on diaWt
   if (filters.diaWtMin !== undefined || filters.diaWtMax !== undefined) {
-    const conditions: Record<string, unknown>[] = [];
-
+    // Marker keys consumed by applyDiaWtRange (raw numeric cast in Postgres).
     if (filters.diaWtMin !== undefined) {
-      conditions.push({
-        diaWt: { not: "" },
-      });
-      // We'll do a raw filter: cast(diaWt to float) >= min
-      // Since SQLite stores these as strings, we rely on Prisma's raw query later.
-      // For now we mark this via a special key that queryProducts will handle.
       where._diaWtMin = filters.diaWtMin;
     }
 
@@ -231,6 +225,49 @@ export interface PaginatedProducts {
 }
 
 /**
+ * diaWt is stored as a string (supplier feed), so a numeric range cannot be
+ * expressed through Prisma's typed filters. Resolve the matching row ids with
+ * one raw Postgres query and feed them back as an `id IN (...)` condition, so
+ * pagination, counts, select-all and CSV export all honour the weight filter.
+ */
+async function applyDiaWtRange(
+  shop: string,
+  where: Record<string, unknown>,
+): Promise<void> {
+  const min = where._diaWtMin as number | undefined;
+  const max = where._diaWtMax as number | undefined;
+  delete where._diaWtMin;
+  delete where._diaWtMax;
+  if (min === undefined && max === undefined) return;
+
+  const rows = await prisma.$queryRaw<{ id: number }[]>`
+    SELECT id FROM "SupplierProduct"
+    WHERE shop = ${shop}
+      AND "diaWt" ~ '^[0-9]+(\.[0-9]+)?$'
+      AND ("diaWt"::double precision >= ${min ?? -1})
+      AND ("diaWt"::double precision <= ${max ?? 1e12})
+  `;
+  where.id = { in: rows.map((r) => r.id) };
+}
+
+function buildOrderBy(
+  sort: CatalogFilters["sort"],
+): Record<string, "asc" | "desc"> {
+  switch (sort) {
+    case "price_asc":
+      return { price: "asc" };
+    case "price_desc":
+      return { price: "desc" };
+    case "sku":
+      return { stockNo: "asc" };
+    case "newest":
+      return { id: "desc" };
+    default:
+      return { stockNo: "asc" };
+  }
+}
+
+/**
  * Query the local catalog with optional filters and pagination.
  */
 export async function queryProducts(
@@ -242,26 +279,12 @@ export async function queryProducts(
   const skip = (page - 1) * limit;
 
   const where = buildWhere(shop, filters);
-
-  // Extract special keys that Prisma can't handle directly
-  const _diaWtMin = where._diaWtMin as number | undefined;
-  const _diaWtMax = where._diaWtMax as number | undefined;
-  delete where._diaWtMin;
-  delete where._diaWtMax;
-
-  // For numeric diaWt filtering on SQLite we need raw conditions.
-  // Build AND array if needed.
-  const andConditions: Record<string, unknown>[] = [];
-  if (_diaWtMin !== undefined || _diaWtMax !== undefined) {
-    // We hack this: filter after query or use raw SQL.
-    // Simpler approach for SQLite: do an in-memory post-filter for diaWt.
-    // We'll fetch without the diaWt filter and post-process.
-  }
+  await applyDiaWtRange(shop, where);
 
   const [rows, total] = await Promise.all([
     prisma.supplierProduct.findMany({
       where: where as any,
-      orderBy: { stockNo: "asc" },
+      orderBy: buildOrderBy(filters.sort),
       skip,
       take: limit,
     }),
@@ -270,27 +293,9 @@ export async function queryProducts(
     }),
   ]);
 
-  // Post-filter for diaWt range (SQLite string columns can't do numeric compare
-  // easily through Prisma)
-  let filtered = rows;
-  if (_diaWtMin !== undefined || _diaWtMax !== undefined) {
-    filtered = rows.filter((row) => {
-      const val = parseFloat(row.diaWt);
-      if (isNaN(val)) return false;
-      if (_diaWtMin !== undefined && val < _diaWtMin) return false;
-      if (_diaWtMax !== undefined && val > _diaWtMax) return false;
-      return true;
-    });
-  }
-
-  // Convert Prisma objects to plain objects
-  const products = filtered.map((r) => ({ ...r }));
-
   return {
-    products,
-    total: _diaWtMin !== undefined || _diaWtMax !== undefined
-      ? filtered.length // approximate when post-filtering
-      : total,
+    products: rows.map((r) => ({ ...r })),
+    total,
     page,
     limit,
     totalPages: Math.ceil(total / limit),
@@ -315,8 +320,7 @@ export async function selectAllInView(
   filters: CatalogFilters,
 ): Promise<{ count: number }> {
   const where = buildWhere(shop, filters);
-  delete where._diaWtMin;
-  delete where._diaWtMax;
+  await applyDiaWtRange(shop, where);
 
   const result = await prisma.supplierProduct.updateMany({
     where: where as any,
@@ -342,8 +346,7 @@ export async function exportToCsv(
   filters: CatalogFilters = {},
 ): Promise<string> {
   const where = buildWhere(shop, filters);
-  delete where._diaWtMin;
-  delete where._diaWtMax;
+  await applyDiaWtRange(shop, where);
 
   const rows = await prisma.supplierProduct.findMany({
     where: where as any,
