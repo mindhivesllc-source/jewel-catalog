@@ -48,8 +48,8 @@ describe("fetchSupplierPage host fallback", () => {
 
   it("uses the documented API host by default", async () => {
     delete process.env.SUPPLIER_API_BASE_URL;
-    const fetchMock = vi.fn(async (_url: string) =>
-      json({ data: [item], message: "Success", status: 1 }),
+    const fetchMock = vi.fn(async (url: string) =>
+      json({ data: [item], message: "Success", status: 1, url }),
     );
     vi.stubGlobal("fetch", fetchMock);
     await fetchSupplierPage("k", 2);
