@@ -117,6 +117,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // Only update if the key doesn't contain masked characters
     if (typeof rawKey === "string" && rawKey.trim() && !rawKey.includes("••••")) {
       updateData.supplierApiKey = encryptSecret(rawKey.trim());
+      // The supplier's 15-minute limit is per API key: a new key starts with
+      // a fresh window, so it can be fetched/tested right away.
+      const current = await prisma.shopSettings.findUnique({
+        where: { shop },
+        select: { supplierApiKey: true },
+      });
+      if (decryptSecret(current?.supplierApiKey) !== rawKey.trim()) {
+        updateData.lastFetchAt = null;
+      }
     }
   }
 

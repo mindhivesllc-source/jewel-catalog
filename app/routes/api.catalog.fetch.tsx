@@ -38,6 +38,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const result = await fetchAndStoreCatalog(shop, apiKey);
     return data({ success: true, total: result.total, warning: result.warning });
   } catch (err) {
+    console.error(
+      `[fetch] ${shop}: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return data(
       { success: false, error: (err instanceof Error && err.message) || "Failed to fetch catalog" },
       { status: 500 },

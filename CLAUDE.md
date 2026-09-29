@@ -97,7 +97,7 @@ Storefront safety rules (do not regress):
   var, and the released app config on Shopify):
   `read_inventory,read_locations,read_products,read_publications,write_inventory,write_metaobject_definitions,write_metaobjects,write_products,write_publications`
 - Changing scopes/config: edit `shopify.app.toml`, then
-  `npx shopify app deploy --allow-updates --no-build -m "why"`, then the
+  `npx shopify app deploy --allow-updates --no-build --message "why"`, then the
   merchant must re-open the app in admin to accept.
 - ALWAYS validate new/changed GraphQL with the shopify-dev-mcp
   `validate_graphql_codeblocks` tool (api: admin, version: 2026-07).
