@@ -49,3 +49,21 @@ describe("buildShopifyProductInput media", () => {
     expect(buildShopifyProductInput(item, "V").media).toEqual([]);
   });
 });
+
+describe("buildShopifyProductInput description", () => {
+  const item = {
+    Stock_No: "S1", Price: "100", Category: "RINGS", Shape: "Round",
+    Metal_Type: "14KW", Dia_Wt: "1.50", Inhand_Pcs: "3", Memo_Out: "1",
+    Subitem: "SUB-9", Remarks: "<script>alert(1)</script>", Color: "E<F",
+  } as unknown as SupplierItem;
+  const html = buildShopifyProductInput(item, "V").descriptionHtml;
+  it("keeps supplier internals off the storefront", () => {
+    expect(html).not.toMatch(/In Hand|Memo|Subitem|SUB-9|script/i);
+  });
+  it("escapes supplier text", () => {
+    expect(html).toContain("E&lt;F");
+  });
+  it("does not tag products as Other", () => {
+    expect(buildShopifyProductInput(item, "V").tags).not.toContain("Other");
+  });
+});

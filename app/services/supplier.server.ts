@@ -99,7 +99,11 @@ export async function fetchSupplierPage(
 ): Promise<SupplierApiResponse> {
   const url = `${BASE_URL}/jewelry?type=all&page=${page}&key=${encodeURIComponent(apiKey)}`;
 
-  const res = await fetch(url, { signal });
+  // The supplier can hang; never let a fetch block the sync lock forever.
+  const timeout = AbortSignal.timeout(90_000);
+  const res = await fetch(url, {
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  });
 
   if (!res.ok) {
     throw new Error(

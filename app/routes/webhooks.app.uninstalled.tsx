@@ -13,5 +13,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await db.session.deleteMany({ where: { shop } });
   }
 
+  // Stop the scheduler from syncing a shop that no longer has the app.
+  await db.shopSettings.updateMany({
+    where: { shop },
+    data: { autoSyncEnabled: false, syncLockedUntil: null },
+  });
+
   return new Response();
 };

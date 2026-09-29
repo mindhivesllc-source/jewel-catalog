@@ -41,6 +41,10 @@ export async function fetchAndStoreCatalog(
   apiKey: string,
   signal?: AbortSignal,
 ): Promise<{ total: number; warning?: string; stockNos: string[] }> {
+  // Stamp the attempt first: even a failed request uses up the supplier's
+  // 15-minute window, and the rate-limit guards key off lastFetchAt.
+  await markSupplierRequest(shop);
+
   const { items, warning } = await fetchAllSupplierProducts(apiKey, signal);
 
   let upserted = 0;
@@ -65,14 +69,27 @@ export async function fetchAndStoreCatalog(
     upserted += batch.length;
   }
 
-  // Update shop settings last-fetch timestamp
+  return { total: upserted, warning, stockNos: items.map((i) => i.Stock_No) };
+}
+
+export const SUPPLIER_WINDOW_MS = 15 * 60 * 1000;
+
+export async function markSupplierRequest(shop: string): Promise<void> {
   await prisma.shopSettings.upsert({
     where: { shop },
     create: { shop, lastFetchAt: new Date() },
     update: { lastFetchAt: new Date() },
   });
+}
 
-  return { total: upserted, warning, stockNos: items.map((i) => i.Stock_No) };
+/** Minutes until the supplier accepts another request (0 = allowed now). */
+export function minutesUntilNextSupplierRequest(
+  lastFetchAt: Date | null | undefined,
+  now = new Date(),
+): number {
+  if (!lastFetchAt) return 0;
+  const remaining = SUPPLIER_WINDOW_MS - (now.getTime() - lastFetchAt.getTime());
+  return remaining > 0 ? Math.ceil(remaining / 60000) : 0;
 }
 
 // ── Counts ───────────────────────────────────────────────────────────────────
@@ -341,6 +358,13 @@ export async function deselectAll(shop: string): Promise<{ count: number }> {
 
 // ── CSV export ───────────────────────────────────────────────────────────────
 
+function csvCell(value: string | null | undefined): string {
+  let v = value ?? "";
+  // Neutralise spreadsheet formulas coming from the supplier feed.
+  if (/^[=+\-@]/.test(v)) v = `'${v}`;
+  return `"${v.replace(/"/g, '""')}"`;
+}
+
 export async function exportToCsv(
   shop: string,
   filters: CatalogFilters = {},
@@ -401,14 +425,13 @@ export async function exportToCsv(
       row.inhandPcs,
       row.memoOut,
       row.price.toString(),
-      // Quote remarks to handle embedded commas
-      `"${(row.remarks ?? "").replace(/"/g, '""')}"`,
+      row.remarks,
       row.image1,
       row.image2,
       row.video,
     ];
 
-    csvRows.push(fields.join(","));
+    csvRows.push(fields.map(csvCell).join(","));
   }
 
   return csvRows.join("\n");

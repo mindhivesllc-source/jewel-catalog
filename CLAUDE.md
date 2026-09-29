@@ -66,6 +66,20 @@ selects products and pushes them to Shopify as Products.
 
 Re-pushing an already-pushed product is allowed and updates it in place.
 
+Storefront safety rules (do not regress):
+
+- Status is `ACTIVE` only on create. Price 0 → `DRAFT`; create without an
+  image → `DRAFT`. Updates never send `status` (except price 0 → `DRAFT`), so
+  a product the merchant drafted/archived is not re-activated.
+- Auto-sync (`trigger = "auto"`) updates price + stock only for mapped
+  products; title/description/tags edited in Shopify admin are preserved.
+  It pushes an explicit id list and never touches the merchant's selection.
+- Variants are written with `inventoryPolicy: "DENY"` (no overselling).
+- The description is shopper-facing specs only, HTML-escaped. No In Hand /
+  Memo Out / Subitem / Remarks.
+- `lastFetchAt` is stamped on every supplier request ATTEMPT (fetch, test
+  connection, sync); manual Fetch/Test return 429 inside the 15-min window.
+
 ## Shopify API rules
 
 - API version: 2026-07 (`ApiVersion.July26` in `app/shopify.server.ts`;

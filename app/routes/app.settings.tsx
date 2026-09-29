@@ -180,6 +180,7 @@ export default function SettingsPage() {
     compareAtMultiplier?: number;
     compareAtFixed?: number;
     defaultLocationId?: string;
+    locations?: { id: string; name: string }[];
     titleTemplate?: string;
     autoSyncEnabled?: boolean;
     lastSyncAt?: string | null;
@@ -243,7 +244,8 @@ export default function SettingsPage() {
               label="Vendor Name"
               name="vendor"
               value={data?.vendor || ""}
-              placeholder="e.g. StarGems"
+              placeholder="Your brand name"
+              details="Shown to shoppers as the product vendor. Use your own brand if you do not want to reveal the supplier."
             />
           </s-stack>
 
@@ -298,7 +300,7 @@ export default function SettingsPage() {
                 name="autoSyncEnabled"
                 value="true"
                 {...(data?.autoSyncEnabled ? { checked: true } : {})}
-                details="Every 15 minutes: re-fetch the supplier catalog, re-push products whose price, stock or details changed, and set stock to 0 for products the supplier delisted. A manual Fetch or Test connection within the last 15 minutes delays the next run (supplier rate limit)."
+                details="Every 15 minutes: re-fetch the supplier catalog, update price and stock of products already in your store, and set stock to 0 for products the supplier no longer lists. Titles, descriptions and photos you edited in Shopify are left alone; use a manual push to re-apply them. A manual Fetch or Test Connection delays the next run by 15 minutes (supplier limit)."
               />
               {data?.lastSyncAt && (
                 <s-text color="subdued">
@@ -327,12 +329,25 @@ export default function SettingsPage() {
           </s-section>
 
           <s-section heading="Store Settings">
-            <s-text-field
-              label="Default Location ID"
+            <s-select
+              label="Inventory location"
               name="defaultLocationId"
               value={data?.defaultLocationId || ""}
-              placeholder="Shopify location ID for inventory"
-            />
+              details="Stock from the supplier feed is set at this location."
+            >
+              <s-option value="" selected={!data?.defaultLocationId}>
+                Automatic (first location)
+              </s-option>
+              {(data?.locations ?? []).map((l) => (
+                <s-option
+                  key={l.id}
+                  value={l.id}
+                  selected={data?.defaultLocationId === l.id}
+                >
+                  {l.name}
+                </s-option>
+              ))}
+            </s-select>
           </s-section>
 
           {data?.lastFetchTimestamp && (

@@ -406,7 +406,6 @@ export function buildProductCreateOrUpdateInput(
       toStringValue(supplierItem.Jewelry_Type) ||
       toStringValue(supplierItem.Category),
     tags: toTags(mapped.tags),
-    status: "ACTIVE",
     metafields: normalizeMetafields(mapped.metafields, supplierItem),
   });
 
@@ -617,6 +616,8 @@ async function updateVariantPricingAndSku(
     id: variantId,
     price: variantInput.price,
     compareAtPrice: variantInput.compareAtPrice,
+    // Never oversell a one-of-a-kind piece once stock reaches 0.
+    inventoryPolicy: "DENY",
     inventoryItem: {
       sku: variantInput.sku,
       tracked: true,
@@ -1138,6 +1139,10 @@ export async function startPushJob(
   shop: string,
   admin: Admin,
   trigger: "manual" | "auto" = "manual",
+  /** Auto-sync passes explicit row ids; manual pushes use the selection. */
+  productIds?: number[],
+  /** Rows back in the supplier feed; delistedAt is cleared once pushed. */
+  relistIds: number[] = [],
 ): Promise<PushStart> {
   const settings = await prisma.shopSettings.findUnique({
     where: { shop },
@@ -1151,18 +1156,10 @@ export async function startPushJob(
 
   await failStaleJobs(shop);
 
-  const running = await prisma.pushJob.findFirst({
-    where: { shop, status: "RUNNING" },
-  });
-
-  if (running) {
-    throw new Error(
-      "A push is already running for this shop. Wait for it to finish before starting another.",
-    );
-  }
-
   const products = await prisma.supplierProduct.findMany({
-    where: { shop, selected: true },
+    where: productIds
+      ? { shop, id: { in: productIds } }
+      : { shop, selected: true },
     orderBy: { stockNo: "asc" },
   });
 
@@ -1170,19 +1167,42 @@ export async function startPushJob(
     return { jobId: 0, totalSelected: 0 };
   }
 
-  const job = await prisma.pushJob.create({
-    data: {
-      shop,
-      status: "RUNNING",
-      trigger,
-      totalSelected: products.length,
-      startedAt: new Date(),
-      pushedCount: 0,
-      failedCount: 0,
-    },
+  // Check-and-create under a per-shop advisory lock so two simultaneous
+  // starts (double click, manual + auto-sync) can never both run.
+  const job = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${shop}))`;
+
+    const running = await tx.pushJob.findFirst({
+      where: { shop, status: "RUNNING" },
+    });
+    if (running) {
+      throw new Error(
+        "A push is already running for this shop. Wait for it to finish before starting another.",
+      );
+    }
+
+    return tx.pushJob.create({
+      data: {
+        shop,
+        status: "RUNNING",
+        trigger,
+        totalSelected: products.length,
+        startedAt: new Date(),
+        pushedCount: 0,
+        failedCount: 0,
+      },
+    });
   });
 
-  void runPushJob(shop, admin, job.id, products, settings).catch(async (err) => {
+  void runPushJob(
+    shop,
+    admin,
+    job.id,
+    products,
+    settings,
+    trigger,
+    new Set(relistIds),
+  ).catch(async (err) => {
     const message = err instanceof Error ? err.message : "Unknown push error";
     console.error(`[push] Job ${job.id} crashed: ${message}`);
 
@@ -1212,6 +1232,8 @@ async function runPushJob(
   jobId: number,
   products: SupplierProductRow[],
   settings: ShopSettingsRow,
+  trigger: "manual" | "auto" = "manual",
+  relistIds: Set<number> = new Set(),
 ): Promise<PushResults> {
   const results: PushResultRow[] = [];
   let pushedCount = 0;
@@ -1288,12 +1310,15 @@ async function runPushJob(
       const built = buildProductCreateOrUpdateInput(supplierItem, settings, pricingRules);
       const sku = built.variant.sku || product.stockNo;
 
-      if (built.variant.price === "0.00") {
+      // A $0 item must never be purchasable: keep it as a draft.
+      const zeroPrice = Number(built.variant.price) <= 0;
+      const hasImage = built.media.some((m) => m.mediaContentType === "IMAGE");
+      if (zeroPrice) {
         await warnLog(
           shop,
           jobId,
           product.stockNo,
-          `Supplier price is 0 — product will be listed at $0.00. Check the supplier feed for this item.`,
+          `Supplier price is 0 — product saved as DRAFT (hidden from the storefront). Set it to Active in Shopify admin once it has a price.`,
         );
       }
 
@@ -1305,10 +1330,20 @@ async function runPushJob(
       let action: "created" | "updated" = "created";
 
       if (existingMapping) {
-        const updateInput = {
-          ...built.product,
-          id: existingMapping.shopifyProductId,
-        };
+        // Auto-sync only refreshes price and stock, so titles, descriptions
+        // and status the merchant edited in Shopify admin are preserved.
+        // A manual push re-applies the full product content.
+        const updateInput =
+          trigger === "auto"
+            ? cleanObject({
+                id: existingMapping.shopifyProductId,
+                status: zeroPrice ? "DRAFT" : undefined,
+              })
+            : cleanObject({
+                ...built.product,
+                id: existingMapping.shopifyProductId,
+                status: zeroPrice ? "DRAFT" : undefined,
+              });
 
         try {
           shopifyProduct = await updateProduct(admin, updateInput);
@@ -1359,10 +1394,11 @@ async function runPushJob(
         const foundBySku = await findProductBySku(admin, sku);
 
         if (foundBySku) {
-          const updateInput = {
+          const updateInput = cleanObject({
             ...built.product,
             id: foundBySku.id,
-          };
+            status: zeroPrice ? "DRAFT" : undefined,
+          });
 
           shopifyProduct = await updateProduct(admin, updateInput);
           action = "updated";
@@ -1376,7 +1412,18 @@ async function runPushJob(
             },
           });
         } else {
-          shopifyProduct = await createProduct(admin, built.product);
+          if (!zeroPrice && !hasImage) {
+            await warnLog(
+              shop,
+              jobId,
+              product.stockNo,
+              `No product image in the supplier feed — product created as DRAFT. Add a photo in Shopify admin, then set it to Active.`,
+            );
+          }
+          shopifyProduct = await createProduct(admin, {
+            ...built.product,
+            status: zeroPrice || !hasImage ? "DRAFT" : "ACTIVE",
+          });
           action = "created";
 
           await prisma.shopifyProductMapping.create({
@@ -1472,6 +1519,7 @@ async function runPushJob(
           pushed: true,
           selected: false,
           lastPushedHash: product.syncHash,
+          ...(relistIds.has(product.id) ? { delistedAt: null } : {}),
         },
       });
 

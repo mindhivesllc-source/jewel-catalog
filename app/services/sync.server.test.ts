@@ -27,6 +27,11 @@ describe("planSync", () => {
     const already = row({ delistedAt: now, inhandPcs: "0" });
     expect(planSync([already], new Set()).delistedIds).toEqual([]);
   });
+  it("re-pushes a relisted row even when its hash is unchanged", () => {
+    const p = planSync([row({ delistedAt: now, inhandPcs: "0" })], new Set(["A"]));
+    expect(p.relistedIds).toEqual([1]);
+    expect(p.changedIds).toEqual([1]);
+  });
   it("relists rows that came back and re-pushes if changed", () => {
     const p = planSync([row({ delistedAt: now, syncHash: "h9" })], new Set(["A"]));
     expect(p.relistedIds).toEqual([1]);

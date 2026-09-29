@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import type {
   HeadersFunction,
 } from "react-router";
-import { useFetcher } from "react-router";
+import { Link, useFetcher } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
@@ -21,6 +21,7 @@ interface Product {
   grossWt: string;
   subitem: string;
   price: number;
+  inhandPcs: string;
   selected: boolean;
   pushed: boolean;
   delistedAt?: string | null;
@@ -37,6 +38,8 @@ interface CountsData {
   styles: string[];
   sizes: string[];
   clarities: string[];
+  lastFetchAt?: string | null;
+  autoSyncEnabled?: boolean;
 }
 
 interface ProductsData {
@@ -270,6 +273,8 @@ export default function CatalogPage() {
 
   /* Selections — Set of stockNos */
   const [selections, setSelections] = useState<Set<string>>(new Set());
+  /* Server-side selection size (spans every page, not just the visible one) */
+  const [selectedCount, setSelectedCount] = useState(0);
 
   /* Did we ever fetch? */
   const [hasFetched, setHasFetched] = useState(false);
@@ -369,6 +374,30 @@ export default function CatalogPage() {
       countsFetcher.load("/api/catalog/counts");
     }
   }, [countsFetcher]);
+
+  useEffect(() => {
+    if (typeof countsFetcher.data?.selected === "number") {
+      setSelectedCount(countsFetcher.data.selected);
+    }
+  }, [countsFetcher.data]);
+
+  /* Bulk select / deselect changes rows on every page: reload from server */
+  useEffect(() => {
+    if (selectFetcher.state !== "idle" || !selectFetcher.data) return;
+    const result = selectFetcher.data as {
+      selectedCount?: number;
+      deselectedCount?: number;
+      error?: string;
+    };
+    if (result.error) {
+      shopify.toast.show(result.error, { isError: true });
+    }
+    if (result.selectedCount !== undefined || result.deselectedCount !== undefined || result.error) {
+      countsFetcher.load("/api/catalog/counts");
+      productsFetcher.load(buildProductsUrl());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectFetcher.data, selectFetcher.state]);
 
   /* On mount, check whether a push is already running (e.g. page reload
      mid-push) and resume polling it */
@@ -565,6 +594,7 @@ export default function CatalogPage() {
 
   const handleToggleSelect = (stockNo: string) => {
     const isSelected = !selections.has(stockNo);
+    setSelectedCount((n) => Math.max(0, n + (isSelected ? 1 : -1)));
     setSelections((prev) => {
       const next = new Set(prev);
       if (isSelected) next.add(stockNo);
@@ -598,6 +628,7 @@ export default function CatalogPage() {
 
   const handleDeselectAll = () => {
     setSelections(new Set());
+    setSelectedCount(0);
     selectFetcher.submit(
       JSON.stringify({ action: "deselectAll" }),
       {
@@ -610,7 +641,7 @@ export default function CatalogPage() {
 
   /* Push button: dry run first, real push only from the preview panel */
   const handlePush = () => {
-    if (selections.size === 0) {
+    if (selectedCount === 0) {
       shopify.toast.show("No products selected", { isError: true });
       return;
     }
@@ -635,6 +666,7 @@ export default function CatalogPage() {
   /** Drop one row from the upcoming push (deselects it server-side too) */
   const handleRemoveFromPreview = (stockNo: string) => {
     setPreviewRows((rows) => rows.filter((r) => r.stockNo !== stockNo));
+    setSelectedCount((n) => Math.max(0, n - 1));
     setSelections((prev) => {
       const next = new Set(prev);
       next.delete(stockNo);
@@ -702,8 +734,31 @@ export default function CatalogPage() {
     setPage(1);
   };
 
-  const handleExport = () => {
-    window.open("/api/catalog/export", "_blank");
+  /* Authenticated download of the rows matching the current filters.
+     (A plain window.open carries no session token inside Shopify admin.) */
+  const handleExport = async () => {
+    try {
+      const url = buildProductsUrl().replace(
+        "/api/catalog/products",
+        "/api/catalog/export",
+      );
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const blob = await res.blob();
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = "catalog-export.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(href);
+    } catch (err) {
+      shopify.toast.show(
+        err instanceof Error ? err.message : "Export failed",
+        { isError: true },
+      );
+    }
   };
 
   const toggleView = (v: string) => {
@@ -725,14 +780,20 @@ export default function CatalogPage() {
         Total: <s-text type="strong">{counts.total}</s-text>
       </s-text>
       <s-text>
-        Available: <s-text type="strong">{counts.notPushed}</s-text>
+        Not in store: <s-text type="strong">{counts.notPushed}</s-text>
       </s-text>
       <s-text>
-        Selected: <s-text type="strong">{counts.selected}</s-text>
+        Selected: <s-text type="strong">{selectedCount}</s-text>
       </s-text>
       <s-text>
-        Pushed: <s-text type="strong">{counts.pushed}</s-text>
+        In store: <s-text type="strong">{counts.pushed}</s-text>
       </s-text>
+      {counts.lastFetchAt && (
+        <s-text color="subdued">
+          Last supplier check: {new Date(counts.lastFetchAt).toLocaleString()}
+          {counts.autoSyncEnabled ? " · auto-sync on" : " · auto-sync off"}
+        </s-text>
+      )}
       <s-stack direction="inline" gap="base" style={{ marginLeft: "auto" }}>
         <s-button
           onClick={handleFetchProducts}
@@ -743,11 +804,11 @@ export default function CatalogPage() {
         <s-button
           tone="neutral"
           onClick={handlePush}
-          {...(pushLoading ? { loading: true } : { disabled: selections.size === 0 || pushLoading })}
+          {...(pushLoading ? { loading: true } : { disabled: selectedCount === 0 || pushLoading })}
         >
           {pushProgress
             ? `Pushing ${pushProgress.pushed + pushProgress.failed}/${pushProgress.total}…`
-            : `Push${selections.size > 0 ? ` (${selections.size})` : ""} ▶`}
+            : `Push${selectedCount > 0 ? ` (${selectedCount})` : ""} ▶`}
         </s-button>
       </s-stack>
     </div>
@@ -965,12 +1026,12 @@ export default function CatalogPage() {
       <s-button
         tone="neutral"
         onClick={handlePush}
-        disabled={selections.size === 0 || pushLoading}
+        disabled={selectedCount === 0 || pushLoading}
         {...(pushLoading ? { loading: true } : {})}
       >
         {pushProgress
           ? `Pushing ${pushProgress.pushed + pushProgress.failed}/${pushProgress.total}…`
-          : `Push (${selections.size}) ▶`}
+          : `Push (${selectedCount}) ▶`}
       </s-button>
       <s-button variant="tertiary" onClick={handleExport} disabled={isAnyLoading}>
         Export CSV
@@ -987,7 +1048,7 @@ export default function CatalogPage() {
         <div style={{ position: "relative" }}>
           <img
             src={product.image1 || ""}
-            alt={"Product"}
+            alt={nameParts.join(" ") || product.stockNo}
             style={STYLES.productImage}
             onError={(e) => {
               (e.target as HTMLImageElement).style.display = "none";
@@ -1007,7 +1068,7 @@ export default function CatalogPage() {
               <s-badge tone="critical">DELISTED</s-badge>
             )}
             {product.pushed && (
-              <s-badge tone="success">PUSHED</s-badge>
+              <s-badge tone="success">IN STORE</s-badge>
             )}
             {!product.pushed && product.selected && (
               <s-badge tone="caution">SELECTED</s-badge>
@@ -1037,7 +1098,12 @@ export default function CatalogPage() {
               color="subdued"
               style={{ display: "block", fontFamily: "monospace", fontSize: "12px" }}
             >
-              SKU: {product.subitem || product.stockNo}
+              SKU: {product.stockNo}
+            </s-text>
+            <s-text color="subdued" style={{ display: "block" }}>
+              {parseInt(product.inhandPcs, 10) > 0
+                ? `In stock: ${parseInt(product.inhandPcs, 10)}`
+                : "Out of stock"}
             </s-text>
           </div>
           <div style={{ marginTop: "8px" }}>
@@ -1084,7 +1150,7 @@ export default function CatalogPage() {
             </s-table-cell>
             <s-table-cell>
               <s-text fontVariantNumeric="tabular-nums" style={{ fontFamily: "monospace", fontSize: "12px" }}>
-                {product.subitem || product.stockNo}
+                {product.stockNo}
               </s-text>
             </s-table-cell>
             <s-table-cell>{[product.jewelryType, product.category, product.metalType, product.shape].filter(Boolean).join(" ")}</s-table-cell>
@@ -1099,11 +1165,11 @@ export default function CatalogPage() {
               {product.delistedAt ? (
                 <s-badge tone="critical">DELISTED</s-badge>
               ) : product.pushed ? (
-                <s-badge tone="success">PUSHED</s-badge>
+                <s-badge tone="success">IN STORE</s-badge>
               ) : product.selected ? (
                 <s-badge tone="caution">SELECTED</s-badge>
               ) : (
-                <s-text color="subdued">\u2014</s-text>
+                <s-text color="subdued">—</s-text>
               )}
             </s-table-cell>
           </s-table-row>
@@ -1288,26 +1354,21 @@ export default function CatalogPage() {
         </s-section>
       )}
 
-      {!previewOpen && !productsLoading && !hasFetched && (
+      {!previewOpen && !productsLoading && !countsLoading && counts.total === 0 && (
         <s-section>
           <s-stack direction="block" gap="base">
             <s-text type="strong">Welcome to Jewel Catalog</s-text>
             <s-text color="subdued">
               Go to{" "}
-              <a
-                href="/app/settings"
+              <Link
+                to="/app/settings"
                 style={{
                   color: "var(--p-interactive, #2c6ecb)",
                   fontWeight: 600,
-                  cursor: "pointer",
-                }}
-                onClick={(e) => {
-                  e.preventDefault();
-                  window.location.href = "/app/settings";
                 }}
               >
                 Settings
-              </a>{" "}
+              </Link>{" "}
               to configure your supplier API key, then come back and click{" "}
               <s-text type="strong">Fetch</s-text> to load your catalog.
             </s-text>
@@ -1315,7 +1376,7 @@ export default function CatalogPage() {
         </s-section>
       )}
 
-      {!previewOpen && !productsLoading && hasFetched && products.length === 0 && (
+      {!previewOpen && !productsLoading && hasFetched && counts.total > 0 && products.length === 0 && (
         <s-section>
           <s-stack direction="block" gap="base">
             <s-text type="strong">No products match your filters</s-text>

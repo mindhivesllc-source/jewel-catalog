@@ -240,6 +240,14 @@ export function renderTitle(
   return out || `Jewelry ${item.Stock_No}`;
 }
 
+export function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export function buildShopifyProductInput(
   item: SupplierItem,
   vendor: string,
@@ -261,33 +269,38 @@ export function buildShopifyProductInput(
   // Storefront title from the merchant's template (stock number lives on SKU)
   const title = renderTitle(titleTemplate, item, { category, jewelryType });
 
-  // Description HTML
-  const bodyLines = [
-    `<p><strong>Stock No:</strong> ${stockNo}</p>`,
-    item.Subitem ? `<p><strong>Subitem:</strong> ${item.Subitem}</p>` : "",
-    `<p><strong>Category:</strong> ${category}</p>`,
-    `<p><strong>Style:</strong> ${jewelryType}</p>`,
-    `<p><strong>Metal:</strong> ${metalType}</p>`,
-    `<p><strong>Shape:</strong> ${shape}</p>`,
-    item.Color ? `<p><strong>Color:</strong> ${item.Color.trim()}</p>` : "",
-    item.Clarity ? `<p><strong>Clarity:</strong> ${item.Clarity.trim()}</p>` : "",
-    item.Dia_Pcs ? `<p><strong>Dia Pcs:</strong> ${item.Dia_Pcs}</p>` : "",
-    item.Dia_Wt ? `<p><strong>Dia Wt:</strong> ${item.Dia_Wt}</p>` : "",
-    item.Gross_Wt ? `<p><strong>Gross Wt:</strong> ${item.Gross_Wt}</p>` : "",
-    item.Casting_Wt ? `<p><strong>Casting Wt:</strong> ${item.Casting_Wt}</p>` : "",
-    `<p><strong>Growth Type:</strong> ${growthType}</p>`,
-    item.Size ? `<p><strong>Size:</strong> ${item.Size.trim()}</p>` : "",
-    item.Certificate ? `<p><strong>Certificate:</strong> ${item.Certificate.trim()}</p>` : "",
-    item.Inhand_Pcs ? `<p><strong>In Hand:</strong> ${item.Inhand_Pcs}</p>` : "",
-    item.Memo_Out ? `<p><strong>Memo Out:</strong> ${item.Memo_Out}</p>` : "",
-    item.Remarks ? `<p><strong>Remarks:</strong> ${item.Remarks.trim()}</p>` : "",
-  ];
-  const descriptionHtml = bodyLines.filter(Boolean).join("\n");
+  // Shopper-facing description: product specs only. Supplier internals
+  // (stock counts, memo, subitem, remarks) stay out of the storefront.
+  const spec = (label: string, value: string | undefined | null, unit = "") => {
+    const v = (value ?? "").trim();
+    if (!v || v === "0" || v === "Other") return "";
+    return `<li><strong>${label}:</strong> ${escapeHtml(v)}${unit}</li>`;
+  };
+  const specLines = [
+    spec("Style", jewelryType),
+    spec("Metal", metalType),
+    spec("Diamond shape", shape),
+    spec("Total diamond weight", item.Dia_Wt, " ct"),
+    spec("Number of diamonds", item.Dia_Pcs),
+    spec("Color", item.Color),
+    spec("Clarity", item.Clarity),
+    spec("Diamond type", growthType ? `Lab grown (${growthType})` : ""),
+    spec("Size", item.Size),
+    spec("Gross weight", item.Gross_Wt),
+    spec("Certificate", item.Certificate),
+    spec("Style number", stockNo),
+  ].filter(Boolean);
+  const descriptionHtml = [
+    `<p>${escapeHtml(title)}.</p>`,
+    specLines.length ? `<ul>\n${specLines.join("\n")}\n</ul>` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-  // Tags
+  // Tags ("Other" is an internal fallback, not a useful storefront tag)
   const tags: string[] = [
     category, metalType, shape, jewelryType, growthType,
-  ].filter((t) => t && t !== "");
+  ].filter((t) => t && t !== "" && t !== "Other");
 
   // Variant pricing
   const compareAt = computeCompareAt(price, compareAtRule, compareAtMultiplier, compareAtFixed);
@@ -302,10 +315,10 @@ export function buildShopifyProductInput(
   // Media (images)
   const media: ShopifyMediaInput[] = [];
   if (item.Image_1) {
-    media.push({ mediaContentType: "IMAGE", originalSource: item.Image_1 });
+    media.push({ mediaContentType: "IMAGE", originalSource: item.Image_1, alt: title });
   }
   if (item.Image_2) {
-    media.push({ mediaContentType: "IMAGE", originalSource: item.Image_2 });
+    media.push({ mediaContentType: "IMAGE", originalSource: item.Image_2, alt: title });
   }
   // Supplier hosts direct mp4 files; Shopify accepts an external URL as the
   // originalSource of a VIDEO and transcodes it asynchronously.

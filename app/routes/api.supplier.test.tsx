@@ -2,6 +2,10 @@ import { data, type LoaderFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { testSupplierConnection } from "../services/supplier.server";
+import {
+  markSupplierRequest,
+  minutesUntilNextSupplierRequest,
+} from "../services/catalog.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -12,11 +16,23 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     if (!settings?.supplierApiKey) {
       return data(
-        { error: "Supplier API key not configured. Please set it in Settings first." },
+        { success: false, error: "Supplier API key not configured. Save it in Settings first." },
         { status: 400 },
       );
     }
 
+    const wait = minutesUntilNextSupplierRequest(settings.lastFetchAt);
+    if (wait > 0) {
+      return data(
+        {
+          success: false,
+          error: `The supplier allows one request every 15 minutes. Try again in ${wait} minute${wait === 1 ? "" : "s"}.`,
+        },
+        { status: 429 },
+      );
+    }
+
+    await markSupplierRequest(shop);
     const result = await testSupplierConnection(settings.supplierApiKey);
     if (!result.ok) {
       return data({ success: false, error: result.error }, { status: 502 });
@@ -24,7 +40,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return data({ success: true, items: result.items });
   } catch (err: any) {
     return data(
-      { error: err.message || "Failed to test supplier connection" },
+      { success: false, error: err.message || "Failed to test supplier connection" },
       { status: 500 },
     );
   }

@@ -7,6 +7,12 @@ function parseBoolParam(value: string | null): boolean | undefined {
   return value === "true" || value === "1";
 }
 
+function parseNumParam(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  const num = parseFloat(value);
+  return isNaN(num) ? undefined : num;
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
@@ -21,6 +27,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     clarity: url.searchParams.get("clarity") || undefined,
     inHand: parseBoolParam(url.searchParams.get("inHand")),
     onMemo: parseBoolParam(url.searchParams.get("onMemo")),
+    diaWtMin: parseNumParam(url.searchParams.get("diaWtMin")),
+    diaWtMax: parseNumParam(url.searchParams.get("diaWtMax")),
     search: url.searchParams.get("search") || undefined,
     selected: parseBoolParam(url.searchParams.get("selected")),
     pushed: parseBoolParam(url.searchParams.get("pushed")),

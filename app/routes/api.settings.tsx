@@ -7,8 +7,33 @@ function maskApiKey(key: string): string {
   return key.slice(0, 4) + "••••" + key.slice(-4);
 }
 
+type AdminGraphql = {
+  graphql: (query: string) => Promise<Response>;
+};
+
+/** Best-effort list of the shop's locations for the inventory picker. */
+async function loadLocations(
+  admin: AdminGraphql,
+): Promise<Array<{ id: string; name: string }>> {
+  try {
+    const response = await admin.graphql(
+      `#graphql
+        query SettingsLocations {
+          locations(first: 50) {
+            nodes { id name }
+          }
+        }
+      `,
+    );
+    const json = await response.json();
+    return json.data?.locations?.nodes ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   try {
@@ -27,6 +52,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       compareAtMultiplier: settings.compareAtMultiplier,
       compareAtFixed: settings.compareAtFixed,
       defaultLocationId: settings.defaultLocationId,
+      locations: await loadLocations(admin),
       titleTemplate: settings.titleTemplate,
       autoSyncEnabled: settings.autoSyncEnabled,
       lastSyncAt: settings.lastSyncAt,
@@ -42,7 +68,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   const contentType = request.headers.get("content-type") || "";
@@ -63,21 +89,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if ("apiKey" in body || "supplierApiKey" in body) {
     const rawKey = body.apiKey || body.supplierApiKey;
     // Only update if the key doesn't contain masked characters
-    if (rawKey && !rawKey.includes("••••")) {
-      updateData.supplierApiKey = rawKey;
+    if (typeof rawKey === "string" && rawKey.trim() && !rawKey.includes("••••")) {
+      updateData.supplierApiKey = rawKey.trim();
     }
   }
 
   if ("vendor" in body) {
-    updateData.vendor = body.vendor;
+    const vendor = String(body.vendor ?? "").trim();
+    if (vendor) updateData.vendor = vendor;
   }
 
   if ("compareAtRule" in body || "compareAtPriceRule" in body) {
-    updateData.compareAtPriceRule = body.compareAtRule || body.compareAtPriceRule;
+    const rule = String(body.compareAtRule || body.compareAtPriceRule || "");
+    if (["none", "multiply", "fixed"].includes(rule)) {
+      updateData.compareAtPriceRule = rule;
+    }
   }
 
   if ("compareAtMultiplier" in body) {
     const val = parseFloat(body.compareAtMultiplier);
+    if (!isNaN(val) && val < 1) {
+      return data(
+        { error: "Compare-at multiplier must be 1 or higher, otherwise the 'was' price would be below the sale price." },
+        { status: 400 },
+      );
+    }
     if (!isNaN(val)) {
       updateData.compareAtMultiplier = val;
     }
@@ -85,13 +121,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if ("compareAtFixed" in body) {
     const val = parseFloat(body.compareAtFixed);
+    if (!isNaN(val) && val < 0) {
+      return data(
+        { error: "Compare-at amount cannot be negative." },
+        { status: 400 },
+      );
+    }
     if (!isNaN(val)) {
       updateData.compareAtFixed = val;
     }
   }
 
   if ("defaultLocationId" in body) {
-    updateData.defaultLocationId = body.defaultLocationId;
+    updateData.defaultLocationId = String(body.defaultLocationId ?? "").trim();
   }
 
   if ("autoSyncEnabled" in body) {
@@ -121,6 +163,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       compareAtMultiplier: settings.compareAtMultiplier,
       compareAtFixed: settings.compareAtFixed,
       defaultLocationId: settings.defaultLocationId,
+      locations: await loadLocations(admin),
       titleTemplate: settings.titleTemplate,
       autoSyncEnabled: settings.autoSyncEnabled,
       lastSyncAt: settings.lastSyncAt,

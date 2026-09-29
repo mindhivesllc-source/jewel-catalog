@@ -59,8 +59,10 @@ export function planSync(
       plan.delistedIds.push(row.id);
       continue;
     }
+    // A relisted row must be re-pushed even with an unchanged hash: its
+    // Shopify stock was forced to 0 when it was delisted.
     if (row.delistedAt) plan.relistedIds.push(row.id);
-    if (row.lastPushedHash !== row.syncHash) plan.changedIds.push(row.id);
+    if (row.delistedAt || row.lastPushedHash !== row.syncHash) plan.changedIds.push(row.id);
   }
   return plan;
 }
@@ -87,10 +89,17 @@ export async function runAutoSync(shop: string, now = new Date()): Promise<SyncO
     return { skipped: "rate-limit window", changed: 0, delisted: 0 };
   }
 
-  await prisma.shopSettings.update({
-    where: { shop },
+  // Atomic claim: only one caller wins the lock.
+  const claimed = await prisma.shopSettings.updateMany({
+    where: {
+      shop,
+      OR: [{ syncLockedUntil: null }, { syncLockedUntil: { lte: now } }],
+    },
     data: { syncLockedUntil: new Date(now.getTime() + SYNC_LOCK_MS) },
   });
+  if (claimed.count === 0) {
+    return { skipped: "locked", changed: 0, delisted: 0 };
+  }
 
   const finish = async (outcome: SyncOutcome, message: string) => {
     await prisma.shopSettings
@@ -122,22 +131,12 @@ export async function runAutoSync(shop: string, now = new Date()): Promise<SyncO
     });
     const plan = planSync(rows, feed);
 
-    if (plan.relistedIds.length) {
-      await prisma.supplierProduct.updateMany({
-        where: { id: { in: plan.relistedIds } },
-        data: { delistedAt: null },
-      });
-    }
+    // The merchant's own selection is never touched: the sync pushes an
+    // explicit id list instead of flagging rows as selected.
     if (plan.delistedIds.length) {
       await prisma.supplierProduct.updateMany({
         where: { id: { in: plan.delistedIds } },
-        data: { inhandPcs: "0", delistedAt: now, selected: true },
-      });
-    }
-    if (plan.changedIds.length) {
-      await prisma.supplierProduct.updateMany({
-        where: { id: { in: plan.changedIds } },
-        data: { selected: true },
+        data: { inhandPcs: "0", delistedAt: now },
       });
     }
 
@@ -150,7 +149,13 @@ export async function runAutoSync(shop: string, now = new Date()): Promise<SyncO
     }
 
     const { admin } = await unauthenticated.admin(shop);
-    const job = await startPushJob(shop, admin as unknown as Admin, "auto");
+    const job = await startPushJob(
+      shop,
+      admin as unknown as Admin,
+      "auto",
+      [...plan.changedIds, ...plan.delistedIds],
+      plan.relistedIds,
+    );
     return finish(
       { fetched: fetched.total, changed: plan.changedIds.length, delisted: plan.delistedIds.length, jobId: job.jobId },
       `Fetched ${fetched.total}; re-pushing ${plan.changedIds.length} changed, ${plan.delistedIds.length} delisted (job ${job.jobId}).`,
