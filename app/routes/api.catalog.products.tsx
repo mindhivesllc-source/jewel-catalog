@@ -13,6 +13,13 @@ function parseNumParam(value: string | null): number | undefined {
   return isNaN(num) ? undefined : num;
 }
 
+const SORTS = ["newest", "price_asc", "price_desc", "sku"] as const;
+type Sort = (typeof SORTS)[number];
+
+function parseSortParam(value: string | null): Sort | undefined {
+  return SORTS.includes(value as Sort) ? (value as Sort) : undefined;
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
@@ -34,6 +41,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     pushed: parseBoolParam(url.searchParams.get("pushed")),
     page: parseInt(url.searchParams.get("page") || "1", 10) || 1,
     limit: parseInt(url.searchParams.get("limit") || "50", 10) || 50,
+    sort: parseSortParam(url.searchParams.get("sort")),
   };
 
   try {

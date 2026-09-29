@@ -1,12 +1,16 @@
 import { data, type LoaderFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { failStaleJobs } from "../services/push.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
   try {
+    // A job killed by a server restart would otherwise show as RUNNING forever.
+    await failStaleJobs(shop);
+
     const [active, recent] = await Promise.all([
       prisma.pushJob.findFirst({
         where: { shop, status: "RUNNING" },

@@ -18,7 +18,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
 
     const result = await testSupplierConnection(settings.supplierApiKey);
-    return data(result);
+    if (!result.ok) {
+      return data({ success: false, error: result.error }, { status: 502 });
+    }
+    return data({ success: true, items: result.items });
   } catch (err: any) {
     return data(
       { error: err.message || "Failed to test supplier connection" },
