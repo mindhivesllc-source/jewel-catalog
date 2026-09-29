@@ -1,8 +1,11 @@
 /**
  * LGD USA Supplier API client.
  *
- * Base URL:  https://lgdusallc.com/developer-api
+ * Docs:      https://documenter.getpostman.com/view/2945489/2sA3Qs8r8b
+ * Base URL:  https://api.lgdusallc.com/api/v1/inventory
+ *            (override with SUPPLIER_API_BASE_URL, comma-separated list)
  * Endpoint:  GET /jewelry?type=all&page={page}&key={apiKey}
+ * The old /developer-api endpoint is deprecated by the supplier.
  * Rate limit: 1 request per 15 minutes.
  */
 
@@ -49,10 +52,15 @@ type FlexibleResponse =
 // Tried in order. The next host is used only when the previous one cannot be
 // reached at all (TLS/DNS/timeout) or no longer serves the API (HTTP 404) —
 // cases where the supplier's rate-limit window was not consumed.
-const BASE_URLS = [
-  "https://lgdusallc.com/developer-api",
-  "https://lgdusallc.net/developer-api",
-];
+const DEFAULT_BASE_URLS = ["https://api.lgdusallc.com/api/v1/inventory"];
+
+function baseUrls(): string[] {
+  const configured = (process.env.SUPPLIER_API_BASE_URL || "")
+    .split(",")
+    .map((u) => u.trim().replace(/\/+$/, ""))
+    .filter((u) => /^https:\/\//i.test(u));
+  return configured.length ? configured : DEFAULT_BASE_URLS;
+}
 
 /** The host answered, but the API is not there (moved / vhost misconfigured). */
 class SupplierApiMissingError extends Error {}
@@ -68,7 +76,7 @@ export class SupplierUnreachableError extends Error {
         ? "it did not respond in time"
         : "the connection failed";
     super(
-      `Could not reach the supplier server (lgdusallc.com / lgdusallc.net): ${reason}${code ? ` [${code}]` : ""}. This is a problem on the supplier's side — please contact LGD USA.`,
+      `Could not reach the supplier API (api.lgdusallc.com): ${reason}${code ? ` [${code}]` : ""}. This is a problem on the supplier's side — please contact LGD USA.`,
     );
     this.name = "SupplierUnreachableError";
   }
@@ -86,6 +94,11 @@ function isValidResponse(
   if (!raw || typeof raw !== "object") return false;
 
   const obj = raw as Record<string, unknown>;
+
+  // e.g. {"error":"This API is deprecated. ...","documentation":"..."}
+  if (typeof obj.error === "string" && obj.error.trim()) {
+    throw new Error(`Supplier API error: ${obj.error.trim()}`);
+  }
 
   // The supplier reports problems inside a 200 response, as "Message" or
   // "message", e.g. {"data":[],"message":"Please Enter Correct API KEY","status":0}
@@ -135,7 +148,7 @@ export async function fetchSupplierPage(
   signal?: AbortSignal,
 ): Promise<SupplierApiResponse> {
   let lastError: unknown;
-  for (const baseUrl of BASE_URLS) {
+  for (const baseUrl of baseUrls()) {
     try {
       return await fetchSupplierPageFrom(baseUrl, apiKey, page, signal);
     } catch (err) {

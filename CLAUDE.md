@@ -128,11 +128,15 @@ Storefront safety rules (do not regress):
 
 ## Gotchas that have already burned time
 
-- Supplier hosts: `lgdusallc.com` (certificate broken since 2026-08, API path
-  404) with automatic fallback to `lgdusallc.net` (`BASE_URLS` in
-  `supplier.server.ts`). Errors arrive inside HTTP 200 as
-  `{"data":[],"message":"...","status":0}` — an empty feed is always treated
-  as a failure, never as "everything delisted".
+- Supplier API (docs: documenter.getpostman.com/view/2945489/2sA3Qs8r8b):
+  `https://api.lgdusallc.com/api/v1/inventory/jewelry`. The old
+  `/developer-api` endpoint is deprecated. Railway variable
+  `SUPPLIER_API_BASE_URL` (comma-separated, tried in order) overrides the
+  host without a deploy. On 2026-09-29 `api.lgdusallc.com` and
+  `lgdusallc.com` served an invalid TLS certificate and 404 — supplier-side.
+  Errors arrive inside HTTP 200 as `{"data":[],"message":"...","status":0}`
+  or `{"error":"..."}` — an empty feed is always treated as a failure, never
+  as "everything delisted".
 
 - Supplier API: 1 request/15min. A failed fetch wastes the window. "Test
   connection" in Settings ALSO consumes the window. Multi-page catalogs are
