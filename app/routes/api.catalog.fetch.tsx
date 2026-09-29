@@ -1,6 +1,7 @@
 import { data, type ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { SupplierUnreachableError } from "../services/supplier.server";
 import { decryptSecret } from "../services/crypto.server";
 import {
   fetchAndStoreCatalog,
@@ -41,6 +42,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     console.error(
       `[fetch] ${shop}: ${err instanceof Error ? err.message : String(err)}`,
     );
+    // The supplier was never reached, so its rate-limit window was not used.
+    if (err instanceof SupplierUnreachableError) {
+      await prisma.shopSettings
+        .update({ where: { shop }, data: { lastFetchAt: settings.lastFetchAt } })
+        .catch(() => {});
+    }
     return data(
       { success: false, error: (err instanceof Error && err.message) || "Failed to fetch catalog" },
       { status: 500 },

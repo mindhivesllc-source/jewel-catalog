@@ -48,6 +48,23 @@ type FlexibleResponse =
 
 const BASE_URL = "https://lgdusallc.com/developer-api";
 
+/** The request never reached the supplier API (DNS, TLS, timeout, refused). */
+export class SupplierUnreachableError extends Error {
+  constructor(cause: unknown) {
+    const inner = (cause as { cause?: { code?: string; message?: string } })?.cause;
+    const code = inner?.code || inner?.message || (cause instanceof Error ? cause.name : "");
+    const reason = /CERT|TLS|SSL/i.test(code)
+      ? "its HTTPS certificate is invalid"
+      : /Timeout|Abort/i.test(code)
+        ? "it did not respond in time"
+        : "the connection failed";
+    super(
+      `Could not reach the supplier server (lgdusallc.com): ${reason}${code ? ` [${code}]` : ""}. This is a problem on the supplier's side — please contact LGD USA.`,
+    );
+    this.name = "SupplierUnreachableError";
+  }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -101,9 +118,14 @@ export async function fetchSupplierPage(
 
   // The supplier can hang; never let a fetch block the sync lock forever.
   const timeout = AbortSignal.timeout(90_000);
-  const res = await fetch(url, {
-    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+    });
+  } catch (err) {
+    throw new SupplierUnreachableError(err);
+  }
 
   if (!res.ok) {
     throw new Error(
@@ -173,7 +195,7 @@ export async function fetchAllSupplierProducts(
  */
 export async function testSupplierConnection(
   apiKey: string,
-): Promise<{ ok: boolean; items?: number; error?: string }> {
+): Promise<{ ok: boolean; items?: number; error?: string; unreachable?: boolean }> {
   try {
     const pageResp = await fetchSupplierPage(apiKey, 1);
     const items = Array.isArray(pageResp.Stock) ? pageResp.Stock.length : 0;
@@ -183,6 +205,10 @@ export async function testSupplierConnection(
     return { ok: true, items };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `Supplier connection failed: ${message}` };
+    return {
+      ok: false,
+      unreachable: err instanceof SupplierUnreachableError,
+      error: `Supplier connection failed: ${message}`,
+    };
   }
 }

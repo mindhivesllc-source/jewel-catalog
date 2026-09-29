@@ -38,6 +38,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const result = await testSupplierConnection(apiKey);
     if (!result.ok) {
       console.error(`[supplier-test] ${shop}: ${result.error}`);
+      if (result.unreachable) {
+        await prisma.shopSettings
+          .update({ where: { shop }, data: { lastFetchAt: settings.lastFetchAt } })
+          .catch(() => {});
+      }
       return data({ success: false, error: result.error }, { status: 502 });
     }
     return data({ success: true, items: result.items });
