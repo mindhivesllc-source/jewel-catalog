@@ -122,6 +122,13 @@ export async function runAutoSync(shop: string, now = new Date()): Promise<SyncO
         `Partial fetch, sync postponed: ${fetched.warning}`,
       );
     }
+    // An empty feed is an outage or a bad key, never "everything sold".
+    if (fetched.total === 0) {
+      return finish(
+        { fetched: 0, changed: 0, delisted: 0, warning: "empty feed" },
+        "Supplier returned no products; sync skipped so store stock is not zeroed.",
+      );
+    }
     const feed = new Set(fetched.stockNos);
 
     const rows = await prisma.supplierProduct.findMany({

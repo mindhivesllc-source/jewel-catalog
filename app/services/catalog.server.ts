@@ -46,6 +46,11 @@ export async function fetchAndStoreCatalog(
   await markSupplierRequest(shop);
 
   const { items, warning } = await fetchAllSupplierProducts(apiKey, signal);
+  if (items.length === 0) {
+    throw new Error(
+      "The supplier returned no products. Check the API key in Settings.",
+    );
+  }
 
   let upserted = 0;
 

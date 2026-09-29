@@ -128,6 +128,12 @@ Storefront safety rules (do not regress):
 
 ## Gotchas that have already burned time
 
+- Supplier hosts: `lgdusallc.com` (certificate broken since 2026-08, API path
+  404) with automatic fallback to `lgdusallc.net` (`BASE_URLS` in
+  `supplier.server.ts`). Errors arrive inside HTTP 200 as
+  `{"data":[],"message":"...","status":0}` — an empty feed is always treated
+  as a failure, never as "everything delisted".
+
 - Supplier API: 1 request/15min. A failed fetch wastes the window. "Test
   connection" in Settings ALSO consumes the window. Multi-page catalogs are
   stored partially and the fetch returns a `warning` string.

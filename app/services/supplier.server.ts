@@ -46,7 +46,16 @@ type FlexibleResponse =
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const BASE_URL = "https://lgdusallc.com/developer-api";
+// Tried in order. The next host is used only when the previous one cannot be
+// reached at all (TLS/DNS/timeout) or no longer serves the API (HTTP 404) —
+// cases where the supplier's rate-limit window was not consumed.
+const BASE_URLS = [
+  "https://lgdusallc.com/developer-api",
+  "https://lgdusallc.net/developer-api",
+];
+
+/** The host answered, but the API is not there (moved / vhost misconfigured). */
+class SupplierApiMissingError extends Error {}
 
 /** The request never reached the supplier API (DNS, TLS, timeout, refused). */
 export class SupplierUnreachableError extends Error {
@@ -59,7 +68,7 @@ export class SupplierUnreachableError extends Error {
         ? "it did not respond in time"
         : "the connection failed";
     super(
-      `Could not reach the supplier server (lgdusallc.com): ${reason}${code ? ` [${code}]` : ""}. This is a problem on the supplier's side — please contact LGD USA.`,
+      `Could not reach the supplier server (lgdusallc.com / lgdusallc.net): ${reason}${code ? ` [${code}]` : ""}. This is a problem on the supplier's side — please contact LGD USA.`,
     );
     this.name = "SupplierUnreachableError";
   }
@@ -78,18 +87,29 @@ function isValidResponse(
 
   const obj = raw as Record<string, unknown>;
 
-  // Detect rate-limit message embedded in response
-  if (obj.Message && typeof obj.Message === "string") {
-    if (obj.Message.toLowerCase().includes("limit")) {
-      throw new Error(
-        "Rate limit reached on supplier API (1 request per 15 min). Please wait before trying again.",
-      );
-    }
+  // The supplier reports problems inside a 200 response, as "Message" or
+  // "message", e.g. {"data":[],"message":"Please Enter Correct API KEY","status":0}
+  const rawMessage = obj.Message ?? obj.message;
+  const message = typeof rawMessage === "string" ? rawMessage.trim() : "";
+  if (message.toLowerCase().includes("limit")) {
+    throw new Error(
+      "Rate limit reached on supplier API (1 request per 15 min). Please wait before trying again.",
+    );
   }
 
   // Accept either "data" or "Stock" as the items array
   const items = obj.data ?? obj.Stock;
   if (!Array.isArray(items)) return false;
+
+  // An error answer must never pass as "the catalog is empty": auto-sync
+  // would then set the stock of every product in the store to 0.
+  if (items.length === 0 && (message || obj.status === 0 || obj.status === "0")) {
+    throw new Error(
+      /api key/i.test(message)
+        ? "The supplier rejected the API key. Check the key in Settings."
+        : `Supplier API error: ${message || "request was not successful"}`,
+    );
+  }
 
   const pageNo = obj.page_no ?? "1";
   const totalPage = obj.total_page ?? 1;
@@ -114,7 +134,33 @@ export async function fetchSupplierPage(
   page = 1,
   signal?: AbortSignal,
 ): Promise<SupplierApiResponse> {
-  const url = `${BASE_URL}/jewelry?type=all&page=${page}&key=${encodeURIComponent(apiKey)}`;
+  let lastError: unknown;
+  for (const baseUrl of BASE_URLS) {
+    try {
+      return await fetchSupplierPageFrom(baseUrl, apiKey, page, signal);
+    } catch (err) {
+      const tryNextHost =
+        err instanceof SupplierUnreachableError ||
+        err instanceof SupplierApiMissingError;
+      if (!tryNextHost) throw err;
+      console.warn(
+        `[supplier] ${new URL(baseUrl).host} unavailable: ${err.message}`,
+      );
+      lastError = err;
+    }
+  }
+  throw lastError instanceof SupplierUnreachableError
+    ? lastError
+    : new SupplierUnreachableError(lastError);
+}
+
+async function fetchSupplierPageFrom(
+  baseUrl: string,
+  apiKey: string,
+  page: number,
+  signal?: AbortSignal,
+): Promise<SupplierApiResponse> {
+  const url = `${baseUrl}/jewelry?type=all&page=${page}&key=${encodeURIComponent(apiKey)}`;
 
   // The supplier can hang; never let a fetch block the sync lock forever.
   const timeout = AbortSignal.timeout(90_000);
@@ -125,6 +171,10 @@ export async function fetchSupplierPage(
     });
   } catch (err) {
     throw new SupplierUnreachableError(err);
+  }
+
+  if (res.status === 404) {
+    throw new SupplierApiMissingError(`HTTP 404 for the API path`);
   }
 
   if (!res.ok) {
