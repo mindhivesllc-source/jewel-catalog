@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import type {
   HeadersFunction,
 } from "react-router";
@@ -162,6 +162,8 @@ const STYLES = {
     overflowX: "auto",
   } as React.CSSProperties,
   categoryTab: (active: boolean): React.CSSProperties => ({
+    border: "none",
+    font: "inherit",
     padding: "8px 16px",
     borderRadius: "4px 4px 0 0",
     cursor: "pointer",
@@ -180,6 +182,8 @@ const STYLES = {
     padding: "8px 0",
   } as React.CSSProperties,
   filterChip: {
+    font: "inherit",
+    color: "inherit",
     display: "inline-flex",
     alignItems: "center",
     gap: "4px",
@@ -305,9 +309,10 @@ export default function CatalogPage() {
     clarities: [],
   };
   const rawData = productsFetcher.data as ProductsData | null;
-  const products: Product[] = Array.isArray(rawData?.products)
-    ? rawData.products
-    : [];
+  const products: Product[] = useMemo(
+    () => (Array.isArray(rawData?.products) ? rawData.products : []),
+    [rawData],
+  );
   const totalProducts = rawData?.total ?? 0;
   const totalPages = rawData?.totalPages ?? 1;
 
@@ -367,6 +372,7 @@ export default function CatalogPage() {
       prevBuildRef.current = url;
       productsFetcher.load(url);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [buildProductsUrl]);
 
   useEffect(() => {
@@ -457,6 +463,7 @@ export default function CatalogPage() {
         shopify.toast.show(result.message);
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pushFetcher.data, pushFetcher.state]);
 
   /* Poll job status while a push is running */
@@ -549,6 +556,7 @@ export default function CatalogPage() {
         shopify.toast.show(result.error, { isError: true });
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchFetcher.data, fetchFetcher.state]);
 
   /* Adopt preview rows when the dry run returns */
@@ -571,6 +579,7 @@ export default function CatalogPage() {
   /* Mark hasFetched */
   useEffect(() => {
     if (rawData && !hasFetched) setHasFetched(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rawData]);
 
   /* Sync selections from product data */
@@ -618,6 +627,19 @@ export default function CatalogPage() {
         action: "selectAll",
         filters: { ...appliedFilters, category: activeCategory, search: appliedSearch, sort, page },
       }),
+      {
+        method: "POST",
+        action: "/api/catalog/select-all",
+        encType: "application/json",
+      }
+    );
+  };
+
+  /* Select everything already in the store, e.g. to re-apply a new title
+     template or refreshed descriptions with one push */
+  const handleSelectInStore = () => {
+    selectFetcher.submit(
+      JSON.stringify({ action: "selectAll", filters: { pushed: true } }),
       {
         method: "POST",
         action: "/api/catalog/select-all",
@@ -819,20 +841,22 @@ export default function CatalogPage() {
     if (cats.length === 0) return null;
     return (
       <div style={STYLES.categoryTabs}>
-        <div
+        <button
+          type="button"
           style={STYLES.categoryTab(activeCategory === "")}
           onClick={() => handleCategoryClick("")}
         >
           All
-        </div>
+        </button>
         {cats.map((cat) => (
-          <div
+          <button
+            type="button"
             key={cat}
             style={STYLES.categoryTab(activeCategory === cat)}
             onClick={() => handleCategoryClick(cat)}
           >
             {cat}
-          </div>
+          </button>
         ))}
       </div>
     );
@@ -951,7 +975,8 @@ export default function CatalogPage() {
           Active filters:
         </s-text>
         {active.map(([key, value]) => (
-          <div
+          <button
+            type="button"
             key={key}
             style={STYLES.filterChip}
             onClick={() => handleRemoveFilter(key)}
@@ -959,15 +984,16 @@ export default function CatalogPage() {
           >
             <span>{filterLabel(key, value)}</span>
             <span style={{ fontWeight: 700, fontSize: "14px" }}>&times;</span>
-          </div>
+          </button>
         ))}
-        <div
+        <button
+          type="button"
           style={{ ...STYLES.filterChip, fontWeight: 600 }}
           onClick={handleClearFilters}
           title="Clear all filters"
         >
           Clear All
-        </div>
+        </button>
       </div>
     );
   };
@@ -1020,6 +1046,9 @@ export default function CatalogPage() {
       <s-button variant="tertiary" onClick={handleSelectAll} disabled={isAnyLoading}>
         Select All
       </s-button>
+      <s-button variant="tertiary" onClick={handleSelectInStore} disabled={isAnyLoading || counts.pushed === 0}>
+        Select in-store ({counts.pushed})
+      </s-button>
       <s-button variant="tertiary" onClick={handleDeselectAll} disabled={isAnyLoading}>
         Deselect
       </s-button>
@@ -1055,13 +1084,12 @@ export default function CatalogPage() {
             }}
           />
           <div style={{ position: "absolute", top: "8px", left: "8px", display: "flex", gap: "4px" }}>
-            <label style={{ display: "flex", alignItems: "center", cursor: "pointer" }}>
-              <s-checkbox
-                name={`select-${product.stockNo}`}
-                checked={isSel}
-                onChange={() => handleToggleSelect(product.stockNo)}
-              />
-            </label>
+            <s-checkbox
+              name={`select-${product.stockNo}`}
+              accessibilityLabel={`Select ${product.stockNo}`}
+              checked={isSel}
+              onChange={() => handleToggleSelect(product.stockNo)}
+            />
           </div>
           <div style={{ position: "absolute", top: "8px", right: "8px", display: "flex", gap: "4px" }}>
             {product.delistedAt && (

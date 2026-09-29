@@ -21,6 +21,7 @@ import {
   DEFAULT_TITLE_TEMPLATE,
 } from "./mapper.server";
 import type { PricingRule } from "./mapper.server";
+import { decryptSecret } from "./crypto.server";
 
 /* ── Types ─────────────────────────────────────────────────────────────────── */
 
@@ -177,7 +178,7 @@ async function shopifyGraphql<T>(
 
   if (json.errors?.length) {
     const message = json.errors
-      .map((error: any) => error.message || JSON.stringify(error))
+      .map((error: { message?: string }) => error.message || JSON.stringify(error))
       .join(" | ");
 
     console.error(`[shopify:${operation}] GraphQL errors`, JSON.stringify(json));
@@ -267,8 +268,8 @@ function normalizeMetafields(
   };
 
   if (Array.isArray(rawMetafields)) {
-    for (const item of rawMetafields as any[]) {
-      add(item.namespace, item.key, item.value, item.type);
+    for (const item of rawMetafields as Record<string, unknown>[]) {
+      add(String(item.namespace ?? ""), String(item.key ?? ""), item.value, String(item.type ?? ""));
     }
   }
 
@@ -322,7 +323,7 @@ function normalizeMedia(
   };
 
   if (Array.isArray(rawMedia)) {
-    for (const item of rawMedia as any[]) {
+    for (const item of rawMedia as Record<string, unknown>[]) {
       add(item.originalSource || item.src || item.url, item.mediaContentType, item.alt);
     }
   }
@@ -389,7 +390,7 @@ export function buildProductCreateOrUpdateInput(
     compareAtFixed,
     pricingRuleFor(rules, supplierItem.Category),
     settings.titleTemplate || DEFAULT_TITLE_TEMPLATE,
-  ) as any;
+  );
 
   const title =
     toStringValue(mapped.title) ||
@@ -1148,7 +1149,7 @@ export async function startPushJob(
     where: { shop },
   });
 
-  if (!settings || !settings.supplierApiKey) {
+  if (!settings || !decryptSecret(settings.supplierApiKey)) {
     throw new Error(
       "Shop settings not found or missing supplier API key. Please configure settings first.",
     );
@@ -1318,7 +1319,7 @@ async function runPushJob(
           shop,
           jobId,
           product.stockNo,
-          `Supplier price is 0 — product saved as DRAFT (hidden from the storefront). Set it to Active in Shopify admin once it has a price.`,
+          `Supplier price is 0 — product saved as DRAFT (hidden from the storefront). It is re-activated automatically when the supplier feed has a price.`,
         );
       }
 
@@ -1368,12 +1369,32 @@ async function runPushJob(
       if (existingMapping && shopifyProduct) {
         action = "updated";
 
+        // Re-activate a product the APP drafted (no price / no photo) once
+        // the reason is gone. Products drafted by the merchant are left alone.
+        const hasPhotoNow = hasImage || (shopifyProduct.mediaCount ?? 0) > 0;
+        const reactivate =
+          existingMapping.autoDrafted && !zeroPrice && hasPhotoNow;
+        if (reactivate) {
+          await updateProduct(admin, { id: shopifyProduct.id, status: "ACTIVE" });
+          await warnLog(
+            shop,
+            jobId,
+            product.stockNo,
+            `Product now has a price and a photo — set back to ACTIVE.`,
+          );
+        }
+
         await prisma.shopifyProductMapping.update({
           where: { id: existingMapping.id },
           data: {
             shopifyProductId: shopifyProduct.id,
             shopifyProductTitle: shopifyProduct.title,
             pushedAt: new Date(),
+            autoDrafted: reactivate
+              ? false
+              : zeroPrice
+                ? true
+                : existingMapping.autoDrafted,
           },
         });
 
@@ -1409,6 +1430,7 @@ async function runPushJob(
               supplierStockNo: product.stockNo,
               shopifyProductId: shopifyProduct.id,
               shopifyProductTitle: shopifyProduct.title,
+              autoDrafted: zeroPrice,
             },
           });
         } else {
@@ -1417,7 +1439,7 @@ async function runPushJob(
               shop,
               jobId,
               product.stockNo,
-              `No product image in the supplier feed — product created as DRAFT. Add a photo in Shopify admin, then set it to Active.`,
+              `No product image in the supplier feed — product created as DRAFT. It is re-activated on the next push once it has a photo (from the supplier or added in Shopify admin).`,
             );
           }
           shopifyProduct = await createProduct(admin, {
@@ -1432,6 +1454,7 @@ async function runPushJob(
               supplierStockNo: product.stockNo,
               shopifyProductId: shopifyProduct.id,
               shopifyProductTitle: shopifyProduct.title,
+              autoDrafted: zeroPrice || !hasImage,
             },
           });
 

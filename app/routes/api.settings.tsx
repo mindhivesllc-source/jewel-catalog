@@ -1,9 +1,13 @@
 import { data, type LoaderFunctionArgs, type ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
+import type { Prisma } from "@prisma/client";
 import prisma from "../db.server";
+import { decryptSecret, encryptSecret } from "../services/crypto.server";
 
-function maskApiKey(key: string): string {
-  if (!key || key.length <= 8) return key;
+function maskApiKey(stored: string): string {
+  const key = decryptSecret(stored);
+  if (!key) return "";
+  if (key.length <= 8) return "••••";
   return key.slice(0, 4) + "••••" + key.slice(-4);
 }
 
@@ -32,6 +36,22 @@ async function loadLocations(
   }
 }
 
+async function loadShopName(admin: AdminGraphql): Promise<string> {
+  try {
+    const response = await admin.graphql(
+      `#graphql
+        query SettingsShopName {
+          shop { name }
+        }
+      `,
+    );
+    const json = await response.json();
+    return String(json.data?.shop?.name ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
@@ -40,8 +60,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     let settings = await prisma.shopSettings.findUnique({ where: { shop } });
 
     if (!settings) {
+      // New shop: shoppers see the vendor, so default to the store's own name
+      // rather than the supplier's.
+      const shopName = await loadShopName(admin);
       settings = await prisma.shopSettings.create({
-        data: { shop },
+        data: { shop, ...(shopName ? { vendor: shopName } : {}) },
       });
     }
 
@@ -59,9 +82,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       lastSyncMessage: settings.lastSyncMessage,
       lastFetchTimestamp: settings.lastFetchAt,
     });
-  } catch (err: any) {
+  } catch (err) {
     return data(
-      { error: err.message || "Failed to get settings" },
+      { error: (err instanceof Error && err.message) || "Failed to get settings" },
       { status: 500 },
     );
   }
@@ -72,6 +95,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const shop = session.shop;
 
   const contentType = request.headers.get("content-type") || "";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- loose form/JSON input, validated field by field below
   let body: Record<string, any> = {};
 
   if (contentType.includes("application/json")) {
@@ -84,13 +108,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   // Map form field names to Prisma field names
-  const updateData: Record<string, any> = {};
+  const updateData: Partial<
+    Omit<Prisma.ShopSettingsUncheckedCreateInput, "shop" | "id">
+  > = {};
 
   if ("apiKey" in body || "supplierApiKey" in body) {
     const rawKey = body.apiKey || body.supplierApiKey;
     // Only update if the key doesn't contain masked characters
     if (typeof rawKey === "string" && rawKey.trim() && !rawKey.includes("••••")) {
-      updateData.supplierApiKey = rawKey.trim();
+      updateData.supplierApiKey = encryptSecret(rawKey.trim());
     }
   }
 
@@ -170,9 +196,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       lastSyncMessage: settings.lastSyncMessage,
       lastFetchTimestamp: settings.lastFetchAt,
     });
-  } catch (err: any) {
+  } catch (err) {
     return data(
-      { error: err.message || "Failed to save settings" },
+      { error: (err instanceof Error && err.message) || "Failed to save settings" },
       { status: 500 },
     );
   }

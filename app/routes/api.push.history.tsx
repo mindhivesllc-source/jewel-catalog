@@ -13,10 +13,33 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       take: 50,
     });
 
-    return data({ jobs });
-  } catch (err: any) {
+    // Warnings (drafted products, skipped photos/stock) and errors, so the
+    // merchant sees exactly which products need attention.
+    const issues = await prisma.pushLog.findMany({
+      where: {
+        shop,
+        jobId: { in: jobs.map((j) => j.id) },
+        level: { in: ["warn", "error"] },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+      select: {
+        id: true,
+        jobId: true,
+        level: true,
+        stockNo: true,
+        message: true,
+        createdAt: true,
+      },
+    });
+
+    return data({ success: true, jobs, issues });
+  } catch (err) {
     return data(
-      { error: err.message || "Failed to get push history" },
+      {
+        success: false,
+        error: err instanceof Error ? err.message : "Failed to get push history",
+      },
       { status: 500 },
     );
   }

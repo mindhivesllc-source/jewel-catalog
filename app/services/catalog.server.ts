@@ -3,8 +3,8 @@
  * local Prisma database.
  */
 
+import type { Prisma } from "@prisma/client";
 import prisma from "../db.server";
-import type { SupplierItem } from "./supplier.server";
 import { fetchAllSupplierProducts } from "./supplier.server";
 import { supplierItemToDbRow } from "./mapper.server";
 
@@ -300,13 +300,13 @@ export async function queryProducts(
 
   const [rows, total] = await Promise.all([
     prisma.supplierProduct.findMany({
-      where: where as any,
+      where: where as Prisma.SupplierProductWhereInput,
       orderBy: buildOrderBy(filters.sort),
       skip,
       take: limit,
     }),
     prisma.supplierProduct.count({
-      where: where as any,
+      where: where as Prisma.SupplierProductWhereInput,
     }),
   ]);
 
@@ -340,7 +340,7 @@ export async function selectAllInView(
   await applyDiaWtRange(shop, where);
 
   const result = await prisma.supplierProduct.updateMany({
-    where: where as any,
+    where: where as Prisma.SupplierProductWhereInput,
     data: { selected: true },
   });
 
@@ -373,7 +373,7 @@ export async function exportToCsv(
   await applyDiaWtRange(shop, where);
 
   const rows = await prisma.supplierProduct.findMany({
-    where: where as any,
+    where: where as Prisma.SupplierProductWhereInput,
     orderBy: { stockNo: "asc" },
   });
 

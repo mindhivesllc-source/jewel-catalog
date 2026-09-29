@@ -15,6 +15,15 @@ interface PushJob {
   completedAt: string | null;
 }
 
+interface PushIssue {
+  id: number;
+  jobId: number;
+  level: string;
+  stockNo: string | null;
+  message: string;
+  createdAt: string;
+}
+
 export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
@@ -39,8 +48,9 @@ export default function HistoryPage() {
     }
   }, [fetcher]);
 
-  const data = fetcher.data as { jobs?: PushJob[] } | null;
+  const data = fetcher.data as { jobs?: PushJob[]; issues?: PushIssue[] } | null;
   const jobs: PushJob[] = Array.isArray(data?.jobs) ? data.jobs : [];
+  const issues: PushIssue[] = Array.isArray(data?.issues) ? data.issues : [];
   const isLoading = ["loading", "submitting"].includes(fetcher.state);
 
   if (isLoading && jobs.length === 0) {
@@ -135,6 +145,35 @@ export default function HistoryPage() {
             );
           })}
         </s-table>
+      </s-section>
+
+      <s-section heading="Products needing attention">
+        {issues.length === 0 ? (
+          <s-text color="subdued">No warnings or errors in recent pushes.</s-text>
+        ) : (
+          <s-table>
+            <s-table-header-row slot="head">
+              <s-table-cell><s-text type="strong">Job</s-text></s-table-cell>
+              <s-table-cell><s-text type="strong">Type</s-text></s-table-cell>
+              <s-table-cell><s-text type="strong">SKU</s-text></s-table-cell>
+              <s-table-cell><s-text type="strong">Details</s-text></s-table-cell>
+              <s-table-cell><s-text type="strong">When</s-text></s-table-cell>
+            </s-table-header-row>
+            {issues.map((issue) => (
+              <s-table-row key={issue.id}>
+                <s-table-cell>{issue.jobId}</s-table-cell>
+                <s-table-cell>
+                  <s-badge tone={issue.level === "error" ? "critical" : "caution"}>
+                    {issue.level === "error" ? "Failed" : "Warning"}
+                  </s-badge>
+                </s-table-cell>
+                <s-table-cell>{issue.stockNo || "—"}</s-table-cell>
+                <s-table-cell>{issue.message}</s-table-cell>
+                <s-table-cell>{formatDate(issue.createdAt)}</s-table-cell>
+              </s-table-row>
+            ))}
+          </s-table>
+        )}
       </s-section>
     </s-page>
   );

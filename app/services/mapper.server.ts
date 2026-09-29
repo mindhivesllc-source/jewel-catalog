@@ -23,10 +23,19 @@ const CATEGORY_MAP: Record<string, string> = {
   JEWELRY_SETS: "Jewelry Sets",
 };
 
+/** "ANKLE_CHAINS" → "Ankle Chains", so new supplier values stay meaningful. */
+function titleCase(raw: string): string {
+  return raw
+    .trim()
+    .replace(/[_\s]+/g, " ")
+    .toLowerCase()
+    .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
 export function mapCategory(raw: string | undefined | null): string {
-  if (!raw) return "Other";
+  if (!raw || !raw.trim()) return "Other";
   const key = raw.trim().toUpperCase();
-  return CATEGORY_MAP[key] ?? "Other";
+  return CATEGORY_MAP[key] ?? titleCase(raw);
 }
 
 // ── Jewelry-type map ─────────────────────────────────────────────────────────
@@ -45,9 +54,9 @@ const JEWELRY_TYPE_MAP: Record<string, string> = {
 };
 
 export function mapJewelryType(raw: string | undefined | null): string {
-  if (!raw) return "Other";
+  if (!raw || !raw.trim()) return "Other";
   const key = raw.trim().toUpperCase();
-  return JEWELRY_TYPE_MAP[key] ?? "Other";
+  return JEWELRY_TYPE_MAP[key] ?? titleCase(raw);
 }
 
 // ── Sync hash ────────────────────────────────────────────────────────────────

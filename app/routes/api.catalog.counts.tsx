@@ -25,9 +25,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       lastFetchAt: settings?.lastFetchAt ?? null,
       autoSyncEnabled: settings?.autoSyncEnabled ?? false,
     });
-  } catch (err: any) {
+  } catch (err) {
     return data(
-      { error: err.message || "Failed to get counts" },
+      { error: (err instanceof Error && err.message) || "Failed to get counts" },
       { status: 500 },
     );
   }

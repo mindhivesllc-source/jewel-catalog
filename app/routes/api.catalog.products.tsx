@@ -47,9 +47,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   try {
     const result = await queryProducts(shop, filters);
     return data(result);
-  } catch (err: any) {
+  } catch (err) {
     return data(
-      { error: err.message || "Failed to query products" },
+      { error: (err instanceof Error && err.message) || "Failed to query products" },
       { status: 500 },
     );
   }

@@ -10,6 +10,7 @@ import prisma from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import { fetchAndStoreCatalog } from "./catalog.server";
 import { startPushJob } from "./push.server";
+import { decryptSecret } from "./crypto.server";
 import type { Admin } from "./push.server";
 
 /** Supplier allows 1 request per 15 minutes — the sync interval equals it. */
@@ -79,7 +80,8 @@ export interface SyncOutcome {
 /** Run one sync for one shop. Never throws; records the outcome on ShopSettings. */
 export async function runAutoSync(shop: string, now = new Date()): Promise<SyncOutcome> {
   const settings = await prisma.shopSettings.findUnique({ where: { shop } });
-  if (!settings || !settings.autoSyncEnabled || !settings.supplierApiKey) {
+  const apiKey = decryptSecret(settings?.supplierApiKey);
+  if (!settings || !settings.autoSyncEnabled || !apiKey) {
     return { skipped: "disabled", changed: 0, delisted: 0 };
   }
   if (settings.syncLockedUntil && settings.syncLockedUntil > now) {
@@ -112,7 +114,7 @@ export async function runAutoSync(shop: string, now = new Date()): Promise<SyncO
   };
 
   try {
-    const fetched = await fetchAndStoreCatalog(shop, settings.supplierApiKey);
+    const fetched = await fetchAndStoreCatalog(shop, apiKey);
     if (fetched.warning) {
       // Partial feed: do NOT treat missing rows as delisted.
       return finish(

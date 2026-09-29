@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyMarkup, buildShopifyProductInput, renderTitle } from "./mapper.server";
+import { applyMarkup, buildShopifyProductInput, mapCategory, mapJewelryType, renderTitle } from "./mapper.server";
 import type { SupplierItem } from "./supplier.server";
 
 describe("applyMarkup", () => {
@@ -65,5 +65,17 @@ describe("buildShopifyProductInput description", () => {
   });
   it("does not tag products as Other", () => {
     expect(buildShopifyProductInput(item, "V").tags).not.toContain("Other");
+  });
+});
+
+describe("category mapping", () => {
+  it("maps known values", () => expect(mapCategory(" bracelet ")).toBe("Bracelets"));
+  it("keeps unknown supplier values readable instead of Other", () => {
+    expect(mapCategory("ANKLE_CHAINS")).toBe("Ankle Chains");
+    expect(mapJewelryType("three stone")).toBe("Three Stone");
+  });
+  it("uses Other only for blanks", () => {
+    expect(mapCategory("  ")).toBe("Other");
+    expect(mapJewelryType(null)).toBe("Other");
   });
 });

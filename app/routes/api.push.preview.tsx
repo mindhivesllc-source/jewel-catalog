@@ -11,9 +11,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const rows = await buildPushPreview(shop);
     const warningCount = rows.filter((r) => r.warnings.length > 0).length;
     return data({ success: true, rows, warningCount });
-  } catch (err: any) {
+  } catch (err) {
     return data(
-      { error: err.message || "Failed to build push preview" },
+      { error: (err instanceof Error && err.message) || "Failed to build push preview" },
       { status: 500 },
     );
   }

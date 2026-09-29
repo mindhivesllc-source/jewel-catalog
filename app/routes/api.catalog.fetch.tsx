@@ -1,6 +1,7 @@
 import { data, type ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { decryptSecret } from "../services/crypto.server";
 import {
   fetchAndStoreCatalog,
   minutesUntilNextSupplierRequest,
@@ -14,7 +15,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const settings = await prisma.shopSettings.findUnique({ where: { shop } });
 
-  if (!settings?.supplierApiKey) {
+  const apiKey = decryptSecret(settings?.supplierApiKey);
+  if (!settings || !apiKey) {
     return data(
       { success: false, error: "Supplier API key not configured. Please set it in Settings first." },
       { status: 400 },
@@ -33,11 +35,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   try {
-    const result = await fetchAndStoreCatalog(shop, settings.supplierApiKey);
+    const result = await fetchAndStoreCatalog(shop, apiKey);
     return data({ success: true, total: result.total, warning: result.warning });
-  } catch (err: any) {
+  } catch (err) {
     return data(
-      { success: false, error: err.message || "Failed to fetch catalog" },
+      { success: false, error: (err instanceof Error && err.message) || "Failed to fetch catalog" },
       { status: 500 },
     );
   }

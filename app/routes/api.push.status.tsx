@@ -26,9 +26,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       active,
       recent: active?.id === recent?.id ? null : recent,
     });
-  } catch (err: any) {
+  } catch (err) {
     return data(
-      { error: err.message || "Failed to get push status" },
+      { error: (err instanceof Error && err.message) || "Failed to get push status" },
       { status: 500 },
     );
   }

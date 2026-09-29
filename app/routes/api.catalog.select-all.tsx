@@ -30,6 +30,7 @@ function toCatalogFilters(raw: Record<string, unknown>): CatalogFilters {
       filters.diaWtMax = parseFloat(range[2]);
     }
   }
+  if (typeof raw.pushed === "boolean") filters.pushed = raw.pushed;
   if (typeof raw.diaWtMin === "number") filters.diaWtMin = raw.diaWtMin;
   if (typeof raw.diaWtMax === "number") filters.diaWtMax = raw.diaWtMax;
   return filters;
@@ -40,7 +41,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const shop = session.shop;
 
   const contentType = request.headers.get("content-type") || "";
-  let body: any = {};
+  let body: { action?: unknown; filters?: unknown } = {};
 
   if (contentType.includes("application/json")) {
     body = await request.json();
@@ -54,7 +55,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   try {
     if (actionType === "selectAll") {
-      const filters = toCatalogFilters(body.filters || {});
+      const filters = toCatalogFilters((body.filters as Record<string, unknown>) || {});
       const result = await selectAllInView(shop, filters);
       return data({ selectedCount: result.count });
     } else if (actionType === "deselectAll") {
@@ -66,9 +67,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         { status: 400 },
       );
     }
-  } catch (err: any) {
+  } catch (err) {
     return data(
-      { error: err.message || "Failed to process select-all action" },
+      { error: (err instanceof Error && err.message) || "Failed to process select-all action" },
       { status: 500 },
     );
   }

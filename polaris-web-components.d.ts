@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 // Polaris web components JSX type declarations
 // These custom elements are loaded at runtime by polaris.js (CDN script tag).
 // TypeScript doesn't know about them out of the box.

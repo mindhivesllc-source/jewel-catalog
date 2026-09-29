@@ -27,12 +27,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       totalSelected: result.totalSelected,
       started: true,
     });
-  } catch (err: any) {
-    console.error(`[push] ERROR: ${err.message}`, err.stack);
-    const alreadyRunning = /already running/i.test(err.message || "");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "";
+    console.error(`[push] ERROR: ${message}`, err instanceof Error ? err.stack : err);
+    const alreadyRunning = /already running/i.test(message);
     return data(
       {
-        error: err.message || "Failed to start push",
+        error: message || "Failed to start push",
         jobId: null,
         started: false,
       },

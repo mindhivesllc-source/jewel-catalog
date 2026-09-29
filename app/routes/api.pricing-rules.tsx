@@ -29,8 +29,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   try {
     return data(await payload(session.shop));
-  } catch (err: any) {
-    return data({ error: err.message || "Failed to load pricing rules" }, { status: 500 });
+  } catch (err) {
+    return data({ error: (err instanceof Error && err.message) || "Failed to load pricing rules" }, { status: 500 });
   }
 };
 
@@ -40,10 +40,10 @@ function parseRules(raw: unknown): RuleInput[] {
   for (const r of raw as Record<string, unknown>[]) {
     const category = String(r.category ?? "").trim();
     if (!category) continue;
-    const markupType = MARKUP_TYPES.includes(r.markupType as any)
+    const markupType = (MARKUP_TYPES as readonly unknown[]).includes(r.markupType)
       ? (r.markupType as RuleInput["markupType"])
       : "percent";
-    const roundTo = ROUND_TO.includes(r.roundTo as any)
+    const roundTo = (ROUND_TO as readonly unknown[]).includes(r.roundTo)
       ? (r.roundTo as RuleInput["roundTo"])
       : "none";
     const markupValue = Number(r.markupValue);
@@ -76,7 +76,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     ]);
 
     return data(await payload(shop));
-  } catch (err: any) {
-    return data({ error: err.message || "Failed to save pricing rules" }, { status: 400 });
+  } catch (err) {
+    return data({ error: (err instanceof Error && err.message) || "Failed to save pricing rules" }, { status: 400 });
   }
 };

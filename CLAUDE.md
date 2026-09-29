@@ -77,6 +77,14 @@ Storefront safety rules (do not regress):
 - Variants are written with `inventoryPolicy: "DENY"` (no overselling).
 - The description is shopper-facing specs only, HTML-escaped. No In Hand /
   Memo Out / Subitem / Remarks.
+- `ShopifyProductMapping.autoDrafted` marks products the APP drafted; they
+  are set back to `ACTIVE` on the next push once price + photo exist.
+- Secrets are encrypted at rest (`app/services/crypto.server.ts`, AES-256-GCM,
+  `enc:v1:` prefix): `ShopSettings.supplierApiKey` and Session tokens (via
+  `EncryptedSessionStorage`). Key = `ENCRYPTION_KEY` env, else derived from
+  `SHOPIFY_API_SECRET`. Always read the key through `decryptSecret`. Rotating
+  the key forces re-auth and re-entry of the supplier key.
+- Unknown supplier categories/styles are title-cased, not filed as "Other".
 - `lastFetchAt` is stamped on every supplier request ATTEMPT (fetch, test
   connection, sync); manual Fetch/Test return 429 inside the 15-min window.
 

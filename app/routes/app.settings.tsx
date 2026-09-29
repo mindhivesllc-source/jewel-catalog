@@ -77,7 +77,7 @@ function MarkupRulesSection() {
       <s-stack direction="block" gap="base">
         <s-text color="subdued">
           Sell price = supplier price + markup, then rounded. Compare-at rules apply on top of
-          the sell price. "All other categories" is the default when a category has no row.
+          the sell price. &quot;All other categories&quot; is the default when a category has no row.
         </s-text>
         {categories.length === 0 && (
           <s-text color="subdued">Fetch the catalog first to see categories.</s-text>
@@ -204,6 +204,7 @@ export default function SettingsPage() {
     if (fetcher.data?.error) {
       shopify.toast.show(fetcher.data.error, { isError: true });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher.data, shopify]);
 
   useEffect(() => {

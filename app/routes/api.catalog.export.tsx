@@ -43,9 +43,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         "Content-Disposition": `attachment; filename="catalog-export.csv"`,
       },
     });
-  } catch (err: any) {
+  } catch (err) {
     return data(
-      { error: err.message || "Failed to export CSV" },
+      { error: (err instanceof Error && err.message) || "Failed to export CSV" },
       { status: 500 },
     );
   }

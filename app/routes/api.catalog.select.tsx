@@ -12,8 +12,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const contentType = request.headers.get("content-type") || "";
 
   if (contentType.includes("application/json")) {
-    const body: any = await request.json();
-    stockNo = body.stockNo;
+    const body = (await request.json()) as Record<string, unknown>;
+    stockNo = typeof body.stockNo === "string" ? body.stockNo : undefined;
     selected = body.selected === true || body.selected === "true";
   } else {
     const formData = await request.formData();
@@ -32,9 +32,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   try {
     await setProductSelected(shop, stockNo, selected);
     return data({ ok: true, stockNo, selected });
-  } catch (err: any) {
+  } catch (err) {
     return data(
-      { error: err.message || "Failed to update selection" },
+      { error: (err instanceof Error && err.message) || "Failed to update selection" },
       { status: 500 },
     );
   }

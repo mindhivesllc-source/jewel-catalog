@@ -111,6 +111,9 @@ model ShopifyProductMapping {
   shopifyProductId    String
   shopifyProductTitle String?
   pushedAt            DateTime @default(now())
+  // true when the app (not the merchant) saved the product as DRAFT because
+  // it had no price or no image; cleared when the app re-activates it
+  autoDrafted         Boolean  @default(false)
 
   @@unique([shop, supplierStockNo])
   @@index([shop])
