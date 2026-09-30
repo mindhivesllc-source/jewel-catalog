@@ -1542,7 +1542,12 @@ async function runPushJob(
           pushed: true,
           selected: false,
           lastPushedHash: product.syncHash,
-          ...(relistIds.has(product.id) ? { delistedAt: null } : {}),
+          // Relisted: back in the feed (auto-sync) or manually pushed with
+          // stock again. A still-delisted row keeps its flag.
+          ...(relistIds.has(product.id) ||
+          (trigger === "manual" && toInt(product.inhandPcs) > 0)
+            ? { delistedAt: null }
+            : {}),
         },
       });
 

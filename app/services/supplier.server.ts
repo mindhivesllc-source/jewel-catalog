@@ -40,6 +40,8 @@ export interface SupplierApiResponse {
   Stock: SupplierItem[];
   page_no: string;
   total_page: number;
+  /** Total items across all pages, when the API reports it. */
+  total_results?: number;
 }
 
 /** Some versions of the API nest items under "data" instead of "Stock". */
@@ -132,6 +134,10 @@ function isValidResponse(
   normalised["Stock"] = items;
   normalised["page_no"] = String(pageNo);
   normalised["total_page"] = Number(totalPage);
+  const totalResults = Number(obj.total_results);
+  normalised["total_results"] = Number.isFinite(totalResults) && totalResults > 0
+    ? totalResults
+    : undefined;
 
   return true;
 }
@@ -215,6 +221,8 @@ export interface SupplierFetchResult {
   items: SupplierItem[];
   totalPages: number;
   fetchedPages: number;
+  /** Item count the supplier reported (undefined when it does not say). */
+  totalResults?: number;
   /** Set when a later page failed (e.g. rate limit) and the result is partial. */
   warning?: string;
 }
@@ -227,6 +235,7 @@ export async function fetchAllSupplierProducts(
   let page = 1;
   let totalPages = 1;
   let fetchedPages = 0;
+  let totalResults: number | undefined;
   let warning: string | undefined;
 
   do {
@@ -234,6 +243,7 @@ export async function fetchAllSupplierProducts(
       const pageResp = await fetchSupplierPage(apiKey, page, signal);
       allItems.push(...pageResp.Stock);
       totalPages = pageResp.total_page;
+      totalResults = pageResp.total_results ?? totalResults;
       fetchedPages++;
       page++;
     } catch (err) {
@@ -247,7 +257,19 @@ export async function fetchAllSupplierProducts(
     }
   } while (page <= totalPages);
 
-  return { items: allItems, totalPages, fetchedPages, warning };
+  // Duplicate stock numbers inside one feed would upsert twice; keep the last.
+  const byStockNo = new Map<string, SupplierItem>();
+  for (const item of allItems) {
+    const stockNo = String(item.Stock_No ?? "").trim();
+    if (stockNo) byStockNo.set(stockNo, { ...item, Stock_No: stockNo });
+  }
+  const items = [...byStockNo.values()];
+
+  if (!warning && totalResults !== undefined && items.length < totalResults) {
+    warning = `The supplier reported ${totalResults} products but sent ${items.length}. Stored what was received; fetch again later to complete the catalog.`;
+  }
+
+  return { items, totalPages, fetchedPages, totalResults, warning };
 }
 
 /**

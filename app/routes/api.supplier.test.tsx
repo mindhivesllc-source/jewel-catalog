@@ -41,7 +41,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (result.unreachable) {
         await prisma.shopSettings
           .update({ where: { shop }, data: { lastFetchAt: settings.lastFetchAt } })
-          .catch(() => {});
+          .catch((e) => console.error(`[supplier-test] ${shop}: could not restore lastFetchAt: ${e}`));
       }
       return data({ success: false, error: result.error }, { status: 502 });
     }

@@ -37,7 +37,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   try {
     const result = await fetchAndStoreCatalog(shop, apiKey);
-    return data({ success: true, total: result.total, warning: result.warning });
+    return data({
+      success: true,
+      total: result.total,
+      warning: result.warning,
+      removed: result.removed,
+      delisted: result.delisted,
+    });
   } catch (err) {
     console.error(
       `[fetch] ${shop}: ${err instanceof Error ? err.message : String(err)}`,
@@ -46,7 +52,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (err instanceof SupplierUnreachableError) {
       await prisma.shopSettings
         .update({ where: { shop }, data: { lastFetchAt: settings.lastFetchAt } })
-        .catch(() => {});
+        .catch((e) => console.error(`[fetch] ${shop}: could not restore lastFetchAt: ${e}`));
     }
     return data(
       { success: false, error: (err instanceof Error && err.message) || "Failed to fetch catalog" },

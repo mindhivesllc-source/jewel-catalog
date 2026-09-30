@@ -542,13 +542,25 @@ export default function CatalogPage() {
         success?: boolean;
         total?: number;
         warning?: string;
+        removed?: number;
+        delisted?: number;
         error?: string;
       };
       if (result.success) {
         if (result.warning) {
           shopify.toast.show(result.warning, { isError: true, duration: 8000 });
         } else {
-          shopify.toast.show(`Fetch completed: ${result.total ?? 0} products`);
+          const extra = [
+            result.removed ? `${result.removed} no longer offered removed` : "",
+            result.delisted
+              ? `${result.delisted} in-store product${result.delisted === 1 ? "" : "s"} now out of stock at the supplier and added to your selection — press Push to update stock`
+              : "",
+          ].filter(Boolean);
+          shopify.toast.show(
+            `Fetch completed: ${result.total ?? 0} products` +
+              (extra.length ? `. ${extra.join(". ")}.` : ""),
+            { duration: extra.length ? 8000 : 5000 },
+          );
         }
         countsFetcher.load("/api/catalog/counts");
         productsFetcher.load(buildProductsUrl());

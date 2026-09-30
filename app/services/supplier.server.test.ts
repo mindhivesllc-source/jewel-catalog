@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { fetchSupplierPage, SupplierUnreachableError } from "./supplier.server";
+import { fetchAllSupplierProducts, fetchSupplierPage, SupplierUnreachableError } from "./supplier.server";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -68,5 +68,39 @@ describe("fetchSupplierPage host fallback", () => {
       json({ data: [], message: "Please Enter Correct API KEY", status: 0 }),
     ));
     await expect(fetchSupplierPage("k")).rejects.toThrow(/rejected the API key/);
+  });
+});
+
+describe("fetchAllSupplierProducts completeness", () => {
+  it("dedupes stock numbers and keeps the last occurrence", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      json({ data: [{ Stock_No: "A1", Price: "1" }, { Stock_No: " A1 ", Price: "2" }, { Stock_No: "B2" }], total_page: 1, total_results: "3" }),
+    ));
+    const out = await fetchAllSupplierProducts("k");
+    expect(out.items.map((i) => [i.Stock_No, i.Price])).toEqual([["A1", "2"], ["B2", undefined]]);
+    expect(out.totalResults).toBe(3);
+    expect(out.warning).toMatch(/reported 3 products but sent 2/);
+  });
+  it("walks every page and reports no warning when complete", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      return json({ data: [{ Stock_No: `P${page}` }], page_no: String(page), total_page: 2, total_results: 2 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await fetchAllSupplierProducts("k");
+    expect(out.items.map((i) => i.Stock_No)).toEqual(["P1", "P2"]);
+    expect(out.fetchedPages).toBe(2);
+    expect(out.warning).toBeUndefined();
+  });
+  it("keeps already-downloaded pages when a later page fails", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      if (page === 2) return json({ Message: "Request limit reached" });
+      return json({ data: [{ Stock_No: `P${page}` }], total_page: 2 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await fetchAllSupplierProducts("k");
+    expect(out.items).toHaveLength(1);
+    expect(out.warning).toMatch(/Fetched 1 of 2 supplier pages/);
   });
 });

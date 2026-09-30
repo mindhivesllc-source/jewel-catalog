@@ -40,12 +40,21 @@ export async function fetchAndStoreCatalog(
   shop: string,
   apiKey: string,
   signal?: AbortSignal,
-): Promise<{ total: number; warning?: string; stockNos: string[] }> {
+): Promise<{
+  total: number;
+  warning?: string;
+  stockNos: string[];
+  /** rows never pushed that left the supplier feed (deleted locally) */
+  removed: number;
+  /** pushed rows that left the feed (stock forced to 0, flagged delisted) */
+  delisted: number;
+}> {
   // Stamp the attempt first: even a failed request uses up the supplier's
   // 15-minute window, and the rate-limit guards key off lastFetchAt.
   await markSupplierRequest(shop);
 
-  const { items, warning } = await fetchAllSupplierProducts(apiKey, signal);
+  const { items, warning, totalResults, fetchedPages, totalPages } =
+    await fetchAllSupplierProducts(apiKey, signal);
   if (items.length === 0) {
     throw new Error(
       "The supplier returned no products. Check the API key in Settings.",
@@ -74,7 +83,38 @@ export async function fetchAndStoreCatalog(
     upserted += batch.length;
   }
 
-  return { total: upserted, warning, stockNos: items.map((i) => i.Stock_No) };
+  // Only a complete feed says what is gone. A partial one (warning) must
+  // not remove or delist anything.
+  let removed = 0;
+  let delisted = 0;
+  if (!warning) {
+    const stockNos = items.map((i) => i.Stock_No);
+    const gone = await prisma.supplierProduct.deleteMany({
+      where: { shop, pushed: false, stockNo: { notIn: stockNos } },
+    });
+    removed = gone.count;
+    const zeroed = await prisma.supplierProduct.updateMany({
+      where: { shop, pushed: true, delistedAt: null, stockNo: { notIn: stockNos } },
+      // Pre-selected so the merchant's next Push sets their store stock to 0.
+      data: { inhandPcs: "0", delistedAt: new Date(), selected: true },
+    });
+    delisted = zeroed.count;
+  }
+
+  console.log(
+    `[fetch] ${shop}: pages ${fetchedPages}/${totalPages}, received ${upserted}` +
+      (totalResults !== undefined ? ` of ${totalResults} reported` : "") +
+      `, removed ${removed} unpushed, delisted ${delisted} pushed` +
+      (warning ? `, warning: ${warning}` : ""),
+  );
+
+  return {
+    total: upserted,
+    warning,
+    stockNos: items.map((i) => i.Stock_No),
+    removed,
+    delisted,
+  };
 }
 
 export const SUPPLIER_WINDOW_MS = 15 * 60 * 1000;
