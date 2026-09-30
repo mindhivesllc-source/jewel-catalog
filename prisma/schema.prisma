@@ -45,6 +45,10 @@ model ShopSettings {
   defaultLocationId String   @default("")
   // Storefront quality (feature 3)
   titleTemplate     String   @default("{diaWt}ct {shape} Lab Grown Diamond {jewelryType} {category} in {metal}")
+  // Merchant-hosted photos: https://cdn/{stockNo}_{n}.jpg, n = 1..customImageCount
+  customImageTemplate   String  @default("")
+  customImageCount      Int     @default(8)
+  includeSupplierImages Boolean @default(false)
   metafieldDefinitionsAt DateTime?
   // Auto-sync (feature 4)
   autoSyncEnabled   Boolean  @default(false)
@@ -114,6 +118,8 @@ model ShopifyProductMapping {
   // true when the app (not the merchant) saved the product as DRAFT because
   // it had no price or no image; cleared when the app re-activates it
   autoDrafted         Boolean  @default(false)
+  // hash of the media URL list last written to Shopify; unchanged => skip media
+  mediaSignature      String?
 
   @@unique([shop, supplierStockNo])
   @@index([shop])

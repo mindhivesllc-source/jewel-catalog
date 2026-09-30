@@ -9,6 +9,7 @@ import {
   dbRowToSupplierItem,
   loadPricingRules,
 } from "./push.server";
+import { customImageUrls } from "./images.server";
 
 export type PreviewWarning = "zero_price" | "no_images" | "zero_stock";
 
@@ -76,7 +77,14 @@ export async function buildPushPreview(shop: string): Promise<PreviewRow[]> {
 
   return products.map((row) => {
     const item = dbRowToSupplierItem(row as unknown as Record<string, unknown>);
-    const built = buildProductCreateOrUpdateInput(item, settings, rules);
+    // Custom photos are shown as expected (existence is checked at push time).
+    const built = buildProductCreateOrUpdateInput(
+      item,
+      settings,
+      rules,
+      undefined,
+      customImageUrls(settings.customImageTemplate, settings.customImageCount, row.stockNo),
+    );
     return previewRow(built, row.stockNo, mapped.has(row.stockNo));
   });
 }

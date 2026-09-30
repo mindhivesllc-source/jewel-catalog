@@ -26,6 +26,12 @@ selects products and pushes them to Shopify as Products.
 - `app/services/mapper.server.ts` — supplier item → DB row / Shopify input.
   Title from `ShopSettings.titleTemplate` (`renderTitle`), per-category
   markup (`applyMarkup`, table CategoryPricingRule), Video_1 → VIDEO media.
+- `app/services/images.server.ts` — merchant-hosted photos. `ShopSettings.
+  customImageTemplate` (`https://cdn/{stockNo}_{n}.jpg`) × `customImageCount`;
+  each URL is HEAD-checked (`imageExists`) before it is sent to Shopify.
+  Manual pushes replace a product's media when the media list changed
+  (`ShopifyProductMapping.mediaSignature`); auto-sync never touches media.
+  Products are pushed by `PUSH_CONCURRENCY` (default 3) parallel workers.
 - `app/services/preview.server.ts` — dry run for `/api/push/preview`
   (Catalog page shows it before every push).
 - `app/services/sync.server.ts` + `app/scheduler.server.ts` — auto-sync

@@ -165,7 +165,11 @@ function MarkupRulesSection() {
 export default function SettingsPage() {
   const fetcher = useFetcher();
   const testFetcher = useFetcher();
+  const imageTestFetcher = useFetcher();
   const shopify = useAppBridge();
+  const [imageTemplate, setImageTemplate] = useState("");
+  const [imageCount, setImageCount] = useState("8");
+  const [imageTestStockNo, setImageTestStockNo] = useState("");
 
   const isLoading =
     ["loading", "submitting"].includes(fetcher.state) &&
@@ -182,6 +186,9 @@ export default function SettingsPage() {
     defaultLocationId?: string;
     locations?: { id: string; name: string }[];
     titleTemplate?: string;
+    customImageTemplate?: string;
+    customImageCount?: number;
+    includeSupplierImages?: boolean;
     autoSyncEnabled?: boolean;
     lastSyncAt?: string | null;
     lastSyncMessage?: string | null;
@@ -212,6 +219,29 @@ export default function SettingsPage() {
       setCompareAtRule(data.compareAtRule);
     }
   }, [data?.compareAtRule]);
+
+  useEffect(() => {
+    if (data && !data.error) {
+      setImageTemplate(data.customImageTemplate ?? "");
+      setImageCount(String(data.customImageCount ?? 8));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.customImageTemplate, data?.customImageCount]);
+
+  const imageTest = imageTestFetcher.data as {
+    success?: boolean;
+    error?: string;
+    stockNo?: string;
+    found?: number;
+    total?: number;
+    results?: { url: string; found: boolean }[];
+  } | null;
+
+  const testImages = () => {
+    const params = new URLSearchParams({ template: imageTemplate, count: imageCount });
+    if (imageTestStockNo.trim()) params.set("stockNo", imageTestStockNo.trim());
+    imageTestFetcher.load(`/api/images/test?${params.toString()}`);
+  };
 
   useEffect(() => {
     if (testFetcher.data) {
@@ -326,6 +356,77 @@ export default function SettingsPage() {
                 value={data?.titleTemplate || "{diaWt}ct {shape} Lab Grown Diamond {jewelryType} {category} in {metal}"}
                 details="Tokens: {diaWt} {shape} {jewelryType} {category} {metal} {color} {clarity} {growthType} {size} {stockNo}. Empty tokens are dropped. Applied on the next push."
               />
+            </s-stack>
+          </s-section>
+
+          <s-section heading="Your own product photos">
+            <s-stack direction="block" gap="base">
+              <s-text color="subdued">
+                Host your photos on any HTTPS location (Shopify Files, Cloudflare R2, Bunny, S3…)
+                named after the stock number: e.g. <code>LGD1002RMH_1.jpg</code> … <code>LGD1002RMH_8.jpg</code>.
+                Enter the address pattern below; the app links the photos that exist for each product on
+                every manual push, in numeric order. Photos are never copied from the supplier when your own exist.
+              </s-text>
+              <s-text-field
+                label="Photo URL pattern"
+                name="customImageTemplate"
+                value={imageTemplate}
+                placeholder="https://cdn.example.com/products/{stockNo}_{n}.jpg"
+                details="Use {stockNo} for the stock number and {n} for the photo number (1, 2, 3…). Leave empty to use supplier photos."
+                onInput={(e: Event) => setImageTemplate((e.target as HTMLInputElement).value)}
+              />
+              <s-number-field
+                label="Photos per product"
+                name="customImageCount"
+                value={imageCount}
+                min="1"
+                max="12"
+                step="1"
+                onInput={(e: Event) => setImageCount((e.target as HTMLInputElement).value)}
+              />
+              <s-checkbox
+                label="Also add the supplier's photos after mine"
+                name="includeSupplierImages"
+                value="true"
+                {...(data?.includeSupplierImages ? { checked: true } : {})}
+              />
+              <s-stack direction="inline" gap="base">
+                <s-text-field
+                  label="Test with stock number"
+                  name="imageTestStockNo"
+                  value={imageTestStockNo}
+                  placeholder="leave empty for the first product"
+                  onInput={(e: Event) => setImageTestStockNo((e.target as HTMLInputElement).value)}
+                />
+                <s-button
+                  type="button"
+                  variant="tertiary"
+                  onClick={testImages}
+                  {...(imageTestFetcher.state !== "idle" ? { loading: true } : {})}
+                  {...(!imageTemplate.trim() ? { disabled: true } : {})}
+                >
+                  Check photos
+                </s-button>
+              </s-stack>
+              {imageTest?.error && (
+                <s-banner tone="critical">
+                  <s-text>{imageTest.error}</s-text>
+                </s-banner>
+              )}
+              {imageTest?.success && (
+                <s-banner tone={imageTest.found ? "success" : "warning"}>
+                  <s-stack direction="block" gap="small-200">
+                    <s-text>
+                      {imageTest.stockNo}: {imageTest.found} of {imageTest.total} photos found.
+                    </s-text>
+                    {(imageTest.results ?? []).map((r) => (
+                      <s-text key={r.url} color={r.found ? undefined : "subdued"}>
+                        {r.found ? "✓" : "✗"} {r.url}
+                      </s-text>
+                    ))}
+                  </s-stack>
+                </s-banner>
+              )}
             </s-stack>
           </s-section>
 

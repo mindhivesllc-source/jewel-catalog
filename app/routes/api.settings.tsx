@@ -3,6 +3,7 @@ import { authenticate } from "../shopify.server";
 import type { Prisma } from "@prisma/client";
 import prisma from "../db.server";
 import { decryptSecret, encryptSecret } from "../services/crypto.server";
+import { validateImageTemplate } from "../services/images.server";
 
 function maskApiKey(stored: string): string {
   const key = decryptSecret(stored);
@@ -77,6 +78,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       defaultLocationId: settings.defaultLocationId,
       locations: await loadLocations(admin),
       titleTemplate: settings.titleTemplate,
+      customImageTemplate: settings.customImageTemplate,
+      customImageCount: settings.customImageCount,
+      includeSupplierImages: settings.includeSupplierImages,
       autoSyncEnabled: settings.autoSyncEnabled,
       lastSyncAt: settings.lastSyncAt,
       lastSyncMessage: settings.lastSyncMessage,
@@ -179,6 +183,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     updateData.autoSyncEnabled = false;
   }
 
+  if ("customImageTemplate" in body) {
+    const t = String(body.customImageTemplate ?? "").trim();
+    const problem = validateImageTemplate(t);
+    if (problem) return data({ error: problem }, { status: 400 });
+    updateData.customImageTemplate = t;
+  }
+
+  if ("customImageCount" in body) {
+    const n = parseInt(String(body.customImageCount), 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 12) updateData.customImageCount = n;
+  }
+
+  if ("includeSupplierImages" in body) {
+    const v = body.includeSupplierImages;
+    updateData.includeSupplierImages = v === true || v === "true" || v === "on" || v === "1";
+  } else if (request.headers.get("content-type")?.includes("form") && "settingsForm" in body) {
+    updateData.includeSupplierImages = false;
+  }
+
   if ("titleTemplate" in body) {
     const t = String(body.titleTemplate ?? "").trim();
     if (t) updateData.titleTemplate = t;
@@ -200,6 +223,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       defaultLocationId: settings.defaultLocationId,
       locations: await loadLocations(admin),
       titleTemplate: settings.titleTemplate,
+      customImageTemplate: settings.customImageTemplate,
+      customImageCount: settings.customImageCount,
+      includeSupplierImages: settings.includeSupplierImages,
       autoSyncEnabled: settings.autoSyncEnabled,
       lastSyncAt: settings.lastSyncAt,
       lastSyncMessage: settings.lastSyncMessage,

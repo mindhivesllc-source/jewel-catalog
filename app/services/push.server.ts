@@ -11,7 +11,7 @@
  *   the whole product fail after it has already been created.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import prisma from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import type { SupplierItem } from "./supplier.server";
@@ -22,6 +22,7 @@ import {
 } from "./mapper.server";
 import type { PricingRule } from "./mapper.server";
 import { decryptSecret } from "./crypto.server";
+import { customImageUrls, resolveCustomImages } from "./images.server";
 
 /* ── Types ─────────────────────────────────────────────────────────────────── */
 
@@ -88,6 +89,15 @@ const GRAPHQL_TRIES = 3;
 // re-acquire it from session storage periodically; the library refreshes the
 // token when it is within 5 minutes of expiry.
 const ADMIN_REFRESH_EVERY_MS = 10 * 60 * 1000;
+// Products pushed in parallel. Each product is ~5 mutations; the GraphQL
+// client retries throttled calls and honors Retry-After, so a small pool is
+// safe under Shopify's cost-based limit while cutting wall time ~3x.
+const PUSH_CONCURRENCY = Math.max(
+  1,
+  Math.min(8, Number(process.env.PUSH_CONCURRENCY) || 3),
+);
+// Custom photos (up to 12) + supplier photos + video.
+const MAX_MEDIA_PER_PRODUCT = 16;
 
 /* ── Generic helpers ───────────────────────────────────────────────────────── */
 
@@ -328,7 +338,7 @@ function normalizeMedia(
     }
   }
 
-  return media.slice(0, 10);
+  return media.slice(0, MAX_MEDIA_PER_PRODUCT);
 }
 
 /** Per-category markup rules for a shop, keyed by mapped category ("*" = default). */
@@ -360,6 +370,8 @@ export function buildProductCreateOrUpdateInput(
   settings: ShopSettingsRow,
   rules?: Map<string, PricingRule>,
   productId?: string,
+  /** Merchant-hosted photo URLs (already verified to exist), shown first. */
+  customImages: string[] = [],
 ): {
   product: Record<string, unknown>;
   media: Array<{
@@ -422,9 +434,25 @@ export function buildProductCreateOrUpdateInput(
 
   const compareAtPrice = toMoney(mapped.variant?.compareAtPrice);
 
+  const supplierMedia: Array<{ originalSource: string; mediaContentType: string; alt?: string }> =
+    Array.isArray(mapped.media) ? mapped.media : [];
+  const rawMedia =
+    customImages.length > 0
+      ? [
+          ...customImages.map((originalSource) => ({
+            originalSource,
+            mediaContentType: "IMAGE",
+            alt: title,
+          })),
+          ...supplierMedia.filter(
+            (m) => settings.includeSupplierImages || m.mediaContentType !== "IMAGE",
+          ),
+        ]
+      : supplierMedia;
+
   return {
     product,
-    media: normalizeMedia(mapped.media),
+    media: normalizeMedia(rawMedia),
     variant: cleanObject({
       sku,
       price,
@@ -705,6 +733,59 @@ async function appendMediaToProduct(
   );
 
   assertNoUserErrors("productUpdateMedia", data.productUpdate.userErrors);
+}
+
+async function getProductMediaIds(
+  admin: Admin,
+  productId: string,
+): Promise<string[]> {
+  const data = await shopifyGraphql<{
+    product: null | { media: { nodes: Array<{ id: string }> } };
+  }>(
+    admin,
+    "productMedia",
+    `#graphql
+      query ProductMedia($id: ID!) {
+        product(id: $id) {
+          media(first: 50) { nodes { id } }
+        }
+      }
+    `,
+    { id: productId },
+  );
+  return data.product?.media.nodes.map((n) => n.id) ?? [];
+}
+
+async function deleteProductMedia(
+  admin: Admin,
+  productId: string,
+  mediaIds: string[],
+): Promise<void> {
+  if (mediaIds.length === 0) return;
+  const data = await shopifyGraphql<{
+    productDeleteMedia: { userErrors: GqlUserError[] };
+  }>(
+    admin,
+    "productDeleteMedia",
+    `#graphql
+      mutation DeleteProductMedia($productId: ID!, $mediaIds: [ID!]!) {
+        productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
+          deletedMediaIds
+          userErrors { field message }
+        }
+      }
+    `,
+    { productId, mediaIds },
+  );
+  assertNoUserErrors("productDeleteMedia", data.productDeleteMedia.userErrors);
+}
+
+export function mediaSignatureOf(
+  media: Array<{ originalSource: string }>,
+): string {
+  return createHash("md5")
+    .update(media.map((m) => m.originalSource).join("\n"))
+    .digest("hex");
 }
 
 async function findProductBySku(
@@ -1243,8 +1324,16 @@ async function runPushJob(
 
   let admin: Admin = initialAdmin;
   let adminAcquiredAt = Date.now();
+  let adminRefresh: Promise<void> | null = null;
   const refreshAdminIfNeeded = async () => {
     if (Date.now() - adminAcquiredAt < ADMIN_REFRESH_EVERY_MS) return;
+    if (adminRefresh) return adminRefresh;
+    adminRefresh = refreshAdmin().finally(() => {
+      adminRefresh = null;
+    });
+    return adminRefresh;
+  };
+  const refreshAdmin = async () => {
     try {
       const ctx = await unauthenticated.admin(shop);
       admin = ctx.admin as unknown as Admin;
@@ -1300,7 +1389,45 @@ async function runPushJob(
     publicationIds,
   );
 
-  for (const product of products) {
+  const customImagesOn = customImageUrls(
+    settings.customImageTemplate,
+    settings.customImageCount,
+    "probe",
+  ).length > 0;
+
+  /**
+   * Bring the product's photos in line with `built.media`. Skipped when the
+   * same media list was already written (signature on the mapping). Existing
+   * photos are replaced only when the merchant configured custom images;
+   * otherwise photos are only added to products that have none.
+   */
+  const syncMedia = async (
+    productId: string,
+    stockNo: string,
+    mediaCount: number | undefined,
+    currentSignature: string | null | undefined,
+    built: ReturnType<typeof buildProductCreateOrUpdateInput>,
+    justCreated: boolean,
+  ): Promise<string | null | undefined> => {
+    if (built.media.length === 0) return currentSignature;
+    const signature = mediaSignatureOf(built.media);
+    if (signature === currentSignature) return currentSignature;
+    const hasMedia = !justCreated && (mediaCount ?? 0) > 0;
+    if (hasMedia && !customImagesOn) return currentSignature;
+    try {
+      if (hasMedia) {
+        await deleteProductMedia(admin, productId, await getProductMediaIds(admin, productId));
+      }
+      await appendMediaToProduct(admin, productId, built.media);
+      return signature;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      await warnLog(shop, jobId, stockNo, `Product pushed, but photo upload failed: ${message}`);
+      return currentSignature;
+    }
+  };
+
+  const processProduct = async (product: SupplierProductRow) => {
     try {
       await refreshAdminIfNeeded();
 
@@ -1308,7 +1435,31 @@ async function runPushJob(
         product as unknown as Record<string, unknown>,
       );
 
-      const built = buildProductCreateOrUpdateInput(supplierItem, settings, pricingRules);
+      // Auto-sync never touches photos, so skip the image checks there.
+      const customImages =
+        trigger === "manual" && customImagesOn
+          ? await resolveCustomImages(
+              settings.customImageTemplate,
+              settings.customImageCount,
+              product.stockNo,
+            )
+          : [];
+      if (trigger === "manual" && customImagesOn && customImages.length === 0) {
+        await warnLog(
+          shop,
+          jobId,
+          product.stockNo,
+          `No custom photos found at ${customImageUrls(settings.customImageTemplate, 1, product.stockNo)[0]} — using supplier photos.`,
+        );
+      }
+
+      const built = buildProductCreateOrUpdateInput(
+        supplierItem,
+        settings,
+        pricingRules,
+        undefined,
+        customImages,
+      );
       const sku = built.variant.sku || product.stockNo;
 
       // A $0 item must never be purchasable: keep it as a draft.
@@ -1384,12 +1535,25 @@ async function runPushJob(
           );
         }
 
+        const mediaSignature =
+          trigger === "manual" || shopifyProduct.mediaCount === 0
+            ? await syncMedia(
+                shopifyProduct.id,
+                product.stockNo,
+                shopifyProduct.mediaCount,
+                existingMapping.mediaSignature,
+                built,
+                false,
+              )
+            : existingMapping.mediaSignature;
+
         await prisma.shopifyProductMapping.update({
           where: { id: existingMapping.id },
           data: {
             shopifyProductId: shopifyProduct.id,
             shopifyProductTitle: shopifyProduct.title,
             pushedAt: new Date(),
+            mediaSignature,
             autoDrafted: reactivate
               ? false
               : zeroPrice
@@ -1397,20 +1561,6 @@ async function runPushJob(
                 : existingMapping.autoDrafted,
           },
         });
-
-        if (shopifyProduct.mediaCount === 0 && built.media.length > 0) {
-          try {
-            await appendMediaToProduct(admin, shopifyProduct.id, built.media);
-          } catch (err) {
-            const message = err instanceof Error ? err.message : "Unknown error";
-            await warnLog(
-              shop,
-              jobId,
-              product.stockNo,
-              `Product updated, but media upload failed: ${message}`,
-            );
-          }
-        }
       } else {
         const foundBySku = await findProductBySku(admin, sku);
 
@@ -1424,6 +1574,15 @@ async function runPushJob(
           shopifyProduct = await updateProduct(admin, updateInput);
           action = "updated";
 
+          const mediaSignature = await syncMedia(
+            shopifyProduct.id,
+            product.stockNo,
+            shopifyProduct.mediaCount,
+            null,
+            built,
+            false,
+          );
+
           await prisma.shopifyProductMapping.create({
             data: {
               shop,
@@ -1431,6 +1590,7 @@ async function runPushJob(
               shopifyProductId: shopifyProduct.id,
               shopifyProductTitle: shopifyProduct.title,
               autoDrafted: zeroPrice,
+              mediaSignature,
             },
           });
         } else {
@@ -1448,6 +1608,15 @@ async function runPushJob(
           });
           action = "created";
 
+          const mediaSignature = await syncMedia(
+            shopifyProduct.id,
+            product.stockNo,
+            0,
+            null,
+            built,
+            true,
+          );
+
           await prisma.shopifyProductMapping.create({
             data: {
               shop,
@@ -1455,20 +1624,9 @@ async function runPushJob(
               shopifyProductId: shopifyProduct.id,
               shopifyProductTitle: shopifyProduct.title,
               autoDrafted: zeroPrice || !hasImage,
+              mediaSignature,
             },
           });
-
-          try {
-            await appendMediaToProduct(admin, shopifyProduct.id, built.media);
-          } catch (err) {
-            const message = err instanceof Error ? err.message : "Unknown error";
-            await warnLog(
-              shop,
-              jobId,
-              product.stockNo,
-              `Product created, but media upload failed: ${message}`,
-            );
-          }
         }
       }
 
@@ -1522,7 +1680,9 @@ async function runPushJob(
         }
       }
 
-      if (publicationIds.length > 0) {
+      // Publishing is idempotent but costs a call per product; auto-sync
+      // only needs it for products it just created.
+      if (publicationIds.length > 0 && (action === "created" || trigger === "manual")) {
         try {
           await publishProduct(admin, shopifyProduct.id, publicationIds);
         } catch (err) {
@@ -1602,7 +1762,18 @@ async function runPushJob(
         errorMessage: firstFailure,
       },
     });
-  }
+  };
+
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < products.length) {
+      const product = products[nextIndex++];
+      await processProduct(product);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(PUSH_CONCURRENCY, products.length) }, worker),
+  );
 
   const finalStatus =
     failedCount > 0 && pushedCount === 0 ? "FAILED" : "COMPLETED";
