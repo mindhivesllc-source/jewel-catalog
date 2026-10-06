@@ -31,7 +31,12 @@ selects products and pushes them to Shopify as Products.
   customImageTemplate` (`https://cdn/{stockNo}_{n}.jpg`) × `customImageCount`;
   each URL is HEAD-checked (`imageExists`) before it is sent to Shopify.
   Manual pushes replace a product's media when the media list changed
-  (`ShopifyProductMapping.mediaSignature`); auto-sync never touches media.
+  (`ShopifyProductMapping.mediaSignature`) AND custom photos were found for
+  that product; auto-sync never touches media. **A photo already on the
+  product under the same file name is never deleted or re-added
+  (`planMediaReplace`)**: when the pattern points at the shop's own Shopify
+  Files (theiajewels.co: `…/cdn/shop/files/{stockNo}-{n}_result.avif`), that
+  photo is the source file and `productDeleteMedia` would destroy it.
   Products are pushed by `PUSH_CONCURRENCY` (default 3) parallel workers.
 - `app/services/preview.server.ts` — dry run for `/api/push/preview`
   (Catalog page shows it before every push).

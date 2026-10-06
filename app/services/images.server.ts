@@ -107,3 +107,30 @@ export async function resolveCustomImages(
   const flags = await Promise.all(urls.map((u) => check(u)));
   return urls.filter((_, i) => flags[i]);
 }
+
+/** File name of a media URL ("…/files/TJ1-1_result.avif?v=1" → "TJ1-1_result.avif"). */
+export function mediaFileName(url: string | undefined | null): string {
+  try {
+    return decodeURIComponent(new URL(url ?? "").pathname.split("/").pop() ?? "");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * What to change so a product's photos match `wanted`. A photo already on the
+ * product under the same file name is kept and not re-added: when the URL
+ * pattern points at the shop's own Shopify Files, that photo IS the source
+ * file, and deleting it would destroy the only copy.
+ */
+export function planMediaReplace<T extends { originalSource: string }>(
+  existing: Array<{ id: string; url?: string | null }>,
+  wanted: T[],
+): { deleteIds: string[]; add: T[] } {
+  const wantedNames = new Set(wanted.map((m) => mediaFileName(m.originalSource)).filter(Boolean));
+  const existingNames = new Set(existing.map((e) => mediaFileName(e.url)).filter(Boolean));
+  return {
+    deleteIds: existing.filter((e) => !wantedNames.has(mediaFileName(e.url))).map((e) => e.id),
+    add: wanted.filter((m) => !existingNames.has(mediaFileName(m.originalSource))),
+  };
+}

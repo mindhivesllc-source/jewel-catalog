@@ -22,7 +22,7 @@ import {
 } from "./mapper.server";
 import type { PricingRule } from "./mapper.server";
 import { decryptSecret } from "./crypto.server";
-import { customImageUrls, resolveCustomImages } from "./images.server";
+import { customImageUrls, planMediaReplace, resolveCustomImages } from "./images.server";
 
 /* ── Types ─────────────────────────────────────────────────────────────────── */
 
@@ -379,6 +379,8 @@ export function buildProductCreateOrUpdateInput(
     mediaContentType: "IMAGE" | "VIDEO" | "EXTERNAL_VIDEO";
     alt?: string;
   }>;
+  /** True when `media` holds the merchant's own photos, not supplier ones. */
+  customMedia: boolean;
   variant: {
     sku: string;
     price: string;
@@ -453,6 +455,7 @@ export function buildProductCreateOrUpdateInput(
   return {
     product,
     media: normalizeMedia(rawMedia),
+    customMedia: customImages.length > 0,
     variant: cleanObject({
       sku,
       price,
@@ -758,25 +761,38 @@ async function sendProductMedia(
   assertNoUserErrors("productUpdateMedia", data.productUpdate.userErrors);
 }
 
-async function getProductMediaIds(
+async function getProductMedia(
   admin: Admin,
   productId: string,
-): Promise<string[]> {
+): Promise<Array<{ id: string; url: string | null }>> {
   const data = await shopifyGraphql<{
-    product: null | { media: { nodes: Array<{ id: string }> } };
+    product: null | {
+      media: { nodes: Array<{ id: string; image?: { url: string } | null }> };
+    };
   }>(
     admin,
     "productMedia",
     `#graphql
       query ProductMedia($id: ID!) {
         product(id: $id) {
-          media(first: 50) { nodes { id } }
+          media(first: 50) {
+            nodes {
+              id
+              ... on MediaImage {
+                image {
+                  url
+                }
+              }
+            }
+          }
         }
       }
     `,
     { id: productId },
   );
-  return data.product?.media.nodes.map((n) => n.id) ?? [];
+  return (
+    data.product?.media.nodes.map((n) => ({ id: n.id, url: n.image?.url ?? null })) ?? []
+  );
 }
 
 async function deleteProductMedia(
@@ -1422,7 +1438,7 @@ async function runPushJob(
   /**
    * Bring the product's photos in line with `built.media`. Skipped when the
    * same media list was already written (signature on the mapping). Existing
-   * photos are replaced only when the merchant configured custom images;
+   * photos are replaced only when custom images were found for this product;
    * otherwise photos are only added to products that have none.
    */
   const syncMedia = async (
@@ -1437,12 +1453,15 @@ async function runPushJob(
     const signature = mediaSignatureOf(built.media);
     if (signature === currentSignature) return currentSignature;
     const hasMedia = !justCreated && (mediaCount ?? 0) > 0;
-    if (hasMedia && !customImagesOn) return currentSignature;
+    if (hasMedia && !built.customMedia) return currentSignature;
     try {
+      let toAdd = built.media;
       if (hasMedia) {
-        await deleteProductMedia(admin, productId, await getProductMediaIds(admin, productId));
+        const plan = planMediaReplace(await getProductMedia(admin, productId), built.media);
+        await deleteProductMedia(admin, productId, plan.deleteIds);
+        toAdd = plan.add;
       }
-      await appendMediaToProduct(admin, productId, built.media);
+      await appendMediaToProduct(admin, productId, toAdd);
       return signature;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";

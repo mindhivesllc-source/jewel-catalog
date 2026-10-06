@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   customImageUrls,
+  mediaFileName,
+  planMediaReplace,
   renderImageUrl,
   resolveCustomImages,
   validateImageTemplate,
@@ -55,5 +57,30 @@ describe("resolveCustomImages", () => {
       "https://cdn.example.com/products/S1_3.jpg",
       "https://cdn.example.com/products/S1_4.jpg",
     ]);
+  });
+});
+
+describe("planMediaReplace", () => {
+  const src = (n: number) => ({
+    originalSource: `https://shop.example/cdn/shop/files/TJ1-${n}_result.avif`,
+  });
+  const own = (n: number) => ({
+    id: `m${n}`,
+    url: `https://cdn.shopify.com/s/files/1/0001/files/TJ1-${n}_result.avif?v=17`,
+  });
+  it("reads the file name without the query", () => {
+    expect(mediaFileName(own(1).url)).toBe("TJ1-1_result.avif");
+    expect(mediaFileName(null)).toBe("");
+  });
+  it("never deletes a photo that is its own source", () => {
+    expect(planMediaReplace([own(1), own(2)], [src(1), src(2)])).toEqual({ deleteIds: [], add: [] });
+  });
+  it("adds only the missing photos and removes the others", () => {
+    const supplier = { id: "s1", url: "https://cdn.shopify.com/s/files/1/0001/files/1.jpg" };
+    const video = { id: "v1", url: null };
+    expect(planMediaReplace([own(1), supplier, video], [src(1), src(2)])).toEqual({
+      deleteIds: ["s1", "v1"],
+      add: [src(2)],
+    });
   });
 });
