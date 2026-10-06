@@ -24,7 +24,8 @@ selects products and pushes them to Shopify as Products.
   endpoint). The admin client is re-acquired via `unauthenticated.admin(shop)`
   every 10 min because offline tokens expire after 60 min.
 - `app/services/mapper.server.ts` — supplier item → DB row / Shopify input.
-  Title from `ShopSettings.titleTemplate` (`renderTitle`), per-category
+  Title from `ShopSettings.titleTemplate` (`renderTitle`; default `{remarks}`
+  = the supplier's one-line description), per-category
   markup (`applyMarkup`, table CategoryPricingRule), Video_1 → VIDEO media.
 - `app/services/images.server.ts` — merchant-hosted photos. `ShopSettings.
   customImageTemplate` (`https://cdn/{stockNo}_{n}.jpg`) × `customImageCount`;
@@ -52,6 +53,8 @@ selects products and pushes them to Shopify as Products.
    status ACTIVE/metafields (2026-07 `product:` argument, NOT `input:`).
 3. Media: `productUpdate(product:{id}, media:[CreateMediaInput])` on create,
    and on update when the product has `mediaCount == 0`. Best-effort → warn.
+   If Shopify rejects the list because of the video ("Invalid video url"),
+   it is re-sent with the photos only.
    Job start also runs `ensureStorefrontSetup`: `custom.*` metafield
    definitions (adminFilterable + smartCollectionCondition) once per shop and
    one smart collection per category via the legacy-but-valid
@@ -59,11 +62,13 @@ selects products and pushes them to Shopify as Products.
 4. `productVariantsBulkUpdate`: price, compareAtPrice, and
    `inventoryItem: { tracked: true, sku }`. **SKU lives on inventoryItem, NOT
    on the variant input** (past bug, commit b5d22ca).
-5. `inventorySetQuantities` (name "available", `ignoreCompareQuantity: true`,
-   `@idempotent(key:)` directive — required since 2026-04) with quantity =
-   supplier `Inhand_Pcs`. **Without `ignoreCompareQuantity: true` Shopify
-   returns COMPARE_QUANTITY_REQUIRED for every item and stock silently stays
-   0** (bug shipped in commit 4a3f132, fixed after).
+5. `inventorySetQuantities` (name "available", `changeFromQuantity: null` on
+   each quantity, `@idempotent(key:)` directive — required since 2026-04)
+   with quantity = supplier `Inhand_Pcs`. **`changeFromQuantity: null` skips
+   the compare check; without it stock silently stays 0.** The input-level
+   `ignoreCompareQuantity` was removed in 2026-04 — sending it fails every
+   stock write and the storefront shows "Sold out" (bug live 2026-09-30 to
+   2026-10-06).
 6. `publishablePublish` to all publications — **without this, products never
    appear on the storefront** even when Active (past bug).
 7. Mark row pushed+deselected, write PushLog, bump PushJob counters.
@@ -81,8 +86,12 @@ Storefront safety rules (do not regress):
   products; title/description/tags edited in Shopify admin are preserved.
   It pushes an explicit id list and never touches the merchant's selection.
 - Variants are written with `inventoryPolicy: "DENY"` (no overselling).
-- The description is shopper-facing specs only, HTML-escaped. No In Hand /
-  Memo Out / Subitem / Remarks.
+- The description is the full supplier detail table (merchant request,
+  2026-10-06): Stock Number, Subitem, Category, Jewelry Type, Metal Type,
+  Shape, Color, Clarity, Diamond Pieces/Weight, Gross/Casting Weight, Growth
+  Type, Size, Setting (`deriveSetting`, parsed from Remarks — the feed has no
+  Setting field), Certificate, In-hand Pieces. HTML-escaped. No Memo Out.
+  Auto-sync never rewrites it, so In-hand Pieces is as of the last manual push.
 - `ShopifyProductMapping.autoDrafted` marks products the APP drafted; they
   are set back to `ACTIVE` on the next push once price + photo exist.
 - Secrets are encrypted at rest (`app/services/crypto.server.ts`, AES-256-GCM,

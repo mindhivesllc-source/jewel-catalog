@@ -4,7 +4,7 @@
  * This version avoids the common 2026-07 Shopify GraphQL failures:
  * - productCreate/productUpdate use the new `product:` argument, not deprecated `input:`
  * - product variants are updated through productVariantsBulkUpdate
- * - inventorySetQuantities uses `ignoreCompareQuantity: true` and @idempotent
+ * - inventorySetQuantities uses `changeFromQuantity: null` and @idempotent
  * - every Admin call retries throttled responses (tries: 3); the admin client is
  *   re-acquired every 10 min so expiring offline tokens never die mid-job
  * - media, inventory and publication failures are logged as warnings instead of making
@@ -709,6 +709,29 @@ async function appendMediaToProduct(
 ): Promise<void> {
   if (media.length === 0) return;
 
+  const images = media.filter((m) => m.mediaContentType === "IMAGE");
+  if (images.length > 0 && images.length < media.length) {
+    // Shopify rejects the whole list when it cannot use the supplier's video
+    // ("Invalid video url"); the photos must not be lost with it.
+    try {
+      await sendProductMedia(admin, productId, media);
+    } catch {
+      await sendProductMedia(admin, productId, images);
+    }
+    return;
+  }
+  await sendProductMedia(admin, productId, media);
+}
+
+async function sendProductMedia(
+  admin: Admin,
+  productId: string,
+  media: Array<{
+    originalSource: string;
+    mediaContentType: "IMAGE" | "VIDEO" | "EXTERNAL_VIDEO";
+    alt?: string;
+  }>,
+): Promise<void> {
   const data = await shopifyGraphql<{
     productUpdate: {
       userErrors: GqlUserError[];
@@ -922,15 +945,16 @@ async function setInventoryQuantity(
         name: "available",
         reason: "correction",
         referenceDocumentUri: `gid://${APP_NAME_FOR_INVENTORY_URI}/PushJob/${params.jobId}-${params.stockNo}`,
-        // The supplier feed is the source of truth for stock, so skip the
-        // compare-and-set check. Without this Shopify rejects every entry
-        // with COMPARE_QUANTITY_REQUIRED and stock silently stays at 0.
-        ignoreCompareQuantity: true,
         quantities: [
           {
             inventoryItemId: params.inventoryItemId,
             locationId: params.locationId,
             quantity: params.quantity,
+            // The supplier feed is the source of truth for stock, so skip the
+            // compare-and-set check with an explicit null (the old
+            // `ignoreCompareQuantity` input field was removed in 2026-04).
+            // Without this stock silently stays at 0.
+            changeFromQuantity: null,
           },
         ],
       },

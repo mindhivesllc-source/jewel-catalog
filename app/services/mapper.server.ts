@@ -213,13 +213,18 @@ interface ShopifyMetafieldInput {
 
 // ── Title template ──────────────────────────────────────────────────────────
 
-export const DEFAULT_TITLE_TEMPLATE =
+// The supplier's own one-line description, e.g.
+// "BEZEL TENNIS NECKLACE 14KW EFG VS2 CVD DIA 10.77CTS".
+export const DEFAULT_TITLE_TEMPLATE = "{remarks}";
+
+// Used when the merchant's template renders empty (e.g. no Remarks).
+export const DESCRIPTIVE_TITLE_TEMPLATE =
   "{diaWt}ct {shape} Lab Grown Diamond {jewelryType} {category} in {metal}";
 
 /**
  * Resolve `{token}` placeholders. Unknown/empty tokens vanish; a "ct" glued to
  * an empty {diaWt} vanishes too; whitespace collapses. Falls back to the
- * stock number so a title is never empty.
+ * descriptive template (which has literal text), so a title is never empty.
  */
 export function renderTitle(
   template: string,
@@ -237,16 +242,28 @@ export function renderTitle(
     growthType: (item.Growth_Type ?? "").trim(),
     size: (item.Size ?? "").trim(),
     stockNo: item.Stock_No ?? "",
+    remarks: (item.Remarks ?? "").trim(),
   };
-  let out = (template || DEFAULT_TITLE_TEMPLATE).replace(
-    /\{(\w+)\}(ct)?/g,
-    (_m, key: string, suffix?: string) => {
-      const v = tokens[key] ?? "";
-      return v ? v + (suffix ?? "") : "";
-    },
-  );
-  out = out.replace(/\s+/g, " ").trim().replace(/\s+in$/i, "");
-  return out || `Jewelry ${item.Stock_No}`;
+  const render = (tpl: string) =>
+    tpl
+      .replace(/\{(\w+)\}(ct)?/g, (_m, key: string, suffix?: string) => {
+        const v = tokens[key] ?? "";
+        return v ? v + (suffix ?? "") : "";
+      })
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\s+in$/i, "");
+  return render(template || DEFAULT_TITLE_TEMPLATE) || render(DESCRIPTIVE_TITLE_TEMPLATE);
+}
+
+// The feed has no Setting field; the supplier names it in Remarks
+// ("BEZEL TENNIS NECKLACE ...", "4 PRONG ...").
+const SETTING_PATTERN =
+  /\b(?:(?:\d+|SHARED|DOUBLE)\s+PRONG|PRONG|HALF\s+BEZEL|BEZEL|CHANNEL|MICRO\s+PAVE|PAVE|FLUSH|TENSION|BASKET|INVISIBLE)\b/i;
+
+export function deriveSetting(remarks: string | undefined | null): string {
+  const match = SETTING_PATTERN.exec(remarks ?? "");
+  return match ? match[0].toUpperCase().replace(/\s+/g, " ") : "";
 }
 
 export function escapeHtml(value: string): string {
@@ -275,33 +292,38 @@ export function buildShopifyProductInput(
   const supplierPrice = parseFloat(item.Price) || 0;
   const price = applyMarkup(supplierPrice, pricing);
 
-  // Storefront title from the merchant's template (stock number lives on SKU)
+  // Storefront title from the merchant's template
   const title = renderTitle(titleTemplate, item, { category, jewelryType });
 
-  // Shopper-facing description: product specs only. Supplier internals
-  // (stock counts, memo, subitem, remarks) stay out of the storefront.
-  const spec = (label: string, value: string | undefined | null, unit = "") => {
+  // Full supplier detail table (HTML-escaped). Memo Out stays internal;
+  // Remarks is the default title and the opening line.
+  const spec = (label: string, value: string | undefined | null) => {
     const v = (value ?? "").trim();
-    if (!v || v === "0" || v === "Other") return "";
-    return `<li><strong>${label}:</strong> ${escapeHtml(v)}${unit}</li>`;
+    if (!v || v === "0" || /^(other|na|n\/a)$/i.test(v)) return "";
+    return `<tr><td><strong>${label}</strong></td><td>${escapeHtml(v)}</td></tr>`;
   };
   const specLines = [
-    spec("Style", jewelryType),
-    spec("Metal", metalType),
-    spec("Diamond shape", shape),
-    spec("Total diamond weight", item.Dia_Wt, " ct"),
-    spec("Number of diamonds", item.Dia_Pcs),
+    spec("Stock Number", stockNo),
+    spec("Subitem", item.Subitem),
+    spec("Category", category.toUpperCase()),
+    spec("Jewelry Type", jewelryType.toUpperCase()),
+    spec("Metal Type", metalType),
+    spec("Shape", shape),
     spec("Color", item.Color),
     spec("Clarity", item.Clarity),
-    spec("Diamond type", growthType ? `Lab grown (${growthType})` : ""),
+    spec("Diamond Pieces", item.Dia_Pcs),
+    spec("Diamond Weight", item.Dia_Wt),
+    spec("Gross Weight", item.Gross_Wt),
+    spec("Casting Weight", item.Casting_Wt),
+    spec("Growth Type", growthType),
     spec("Size", item.Size),
-    spec("Gross weight", item.Gross_Wt),
+    spec("Setting", deriveSetting(item.Remarks)),
     spec("Certificate", item.Certificate),
-    spec("Style number", stockNo),
+    spec("In-hand Pieces", item.Inhand_Pcs),
   ].filter(Boolean);
   const descriptionHtml = [
-    `<p>${escapeHtml(title)}.</p>`,
-    specLines.length ? `<ul>\n${specLines.join("\n")}\n</ul>` : "",
+    `<p>${escapeHtml(title)}</p>`,
+    specLines.length ? `<table>\n<tbody>\n${specLines.join("\n")}\n</tbody>\n</table>` : "",
   ]
     .filter(Boolean)
     .join("\n");

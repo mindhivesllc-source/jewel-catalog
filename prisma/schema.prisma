@@ -44,7 +44,7 @@ model ShopSettings {
   compareAtFixed    Float    @default(0)
   defaultLocationId String   @default("")
   // Storefront quality (feature 3)
-  titleTemplate     String   @default("{diaWt}ct {shape} Lab Grown Diamond {jewelryType} {category} in {metal}")
+  titleTemplate     String   @default("{remarks}")
   // Merchant-hosted photos: https://cdn/{stockNo}_{n}.jpg, n = 1..customImageCount
   customImageTemplate   String  @default("")
   customImageCount      Int     @default(8)

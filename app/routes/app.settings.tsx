@@ -353,8 +353,8 @@ export default function SettingsPage() {
               <s-text-field
                 label="Product title template"
                 name="titleTemplate"
-                value={data?.titleTemplate || "{diaWt}ct {shape} Lab Grown Diamond {jewelryType} {category} in {metal}"}
-                details="Tokens: {diaWt} {shape} {jewelryType} {category} {metal} {color} {clarity} {growthType} {size} {stockNo}. Empty tokens are dropped. Applied on the next push."
+                value={data?.titleTemplate || "{remarks}"}
+                details="Tokens: {remarks} (supplier description) {diaWt} {shape} {jewelryType} {category} {metal} {color} {clarity} {growthType} {size} {stockNo}. Empty tokens are dropped. Applied on the next push."
               />
             </s-stack>
           </s-section>
